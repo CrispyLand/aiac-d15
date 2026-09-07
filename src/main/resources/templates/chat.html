@@ -48,26 +48,32 @@
         button:hover { background: #364fc7; }
         details summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
         details[open] summary { margin-bottom: 16px; }
-        .answer { white-space: pre-wrap; }
         .error { border-left: 3px solid #e03131; background: #fff5f5; color: #a12a2a; }
-        .usage { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+        .usage { display: flex; flex-wrap: wrap; gap: 10px; }
         .pill {
             border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px;
             font-size: 12px; color: var(--muted); background: #fbfbfc;
         }
         .pill b { color: var(--ink); font-variant-numeric: tabular-nums; }
-        .meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+        .meta { font-size: 12px; color: var(--muted); margin-top: 10px; }
         h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
              color: var(--muted); margin: 0 0 10px; }
-        .turn { padding: 12px 14px; border-radius: 9px; margin-bottom: 10px; white-space: pre-wrap; }
+        .turn { padding: 12px 14px; border-radius: 9px; margin-bottom: 10px; }
         .turn.user { background: #eef1fb; border: 1px solid #d8e0f7; }
         .turn.assistant { background: #f7f8fa; border: 1px solid var(--line); }
-        .who { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase;
-               letter-spacing: .05em; color: var(--muted); margin-bottom: 5px; }
-        .bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+        .turnhead { display: flex; align-items: baseline; justify-content: space-between;
+                    gap: 12px; margin-bottom: 6px; }
+        .who { font-size: 11px; font-weight: 700; text-transform: uppercase;
+               letter-spacing: .05em; color: var(--muted); }
+        .mstats { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
+                  text-align: right; }
+        .mstats b { color: #40454d; }
+        .body { white-space: pre-wrap; }
+        .bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
         .ghost { background: transparent; color: var(--muted); border: 1px solid var(--line);
                  padding: 6px 12px; font-size: 12px; font-weight: 600; }
         .ghost:hover { background: #f1f3f5; color: var(--ink); }
+        .empty { color: var(--muted); font-size: 13px; }
     </style>
 </head>
 <body>
@@ -75,32 +81,9 @@
     <h1>Agent Chat</h1>
     <div class="sub">Spring Boot &rarr; <code>com.crispyland.agent</code> &rarr; Groq chat completions</div>
 
-    <div class="card" th:if="${!#lists.isEmpty(transcript)}">
-        <div class="bar">
-            <h2 style="margin:0">Conversation
-                <span th:text="'· ' + ${#lists.size(transcript)} + ' messages'"></span></h2>
-            <form method="post" action="/reset" style="margin:0">
-                <button type="submit" class="ghost">New chat</button>
-            </form>
-        </div>
-        <div th:each="m : ${transcript}" class="turn"
-             th:classappend="${m.user} ? 'user' : 'assistant'">
-            <span class="who" th:text="${m.user} ? 'you' : 'agent'"></span>
-            <span th:text="${m.content}"></span>
-        </div>
-    </div>
-
     <form method="post" action="/">
-        <div class="card">
-            <div class="field">
-                <label for="userInput">Your message</label>
-                <textarea id="userInput" name="userInput" rows="4" autofocus
-                          placeholder="Ask anything — the agent remembers the turns above…"
-                          th:text="${form.userInput}"></textarea>
-            </div>
-            <button type="submit">Send</button>
-        </div>
 
+        <!-- 1. Parameters -->
         <div class="card">
             <details open>
                 <summary>Request parameters</summary>
@@ -155,7 +138,57 @@
                 </div>
             </details>
         </div>
+
+        <!-- 2. Conversation -->
+        <div class="card">
+            <div class="bar">
+                <h2 style="margin:0">Conversation<span
+                        th:if="${!#lists.isEmpty(transcript)}"
+                        th:text="' · ' + ${#lists.size(transcript)} + ' messages'"></span></h2>
+                <button type="submit" form="resetForm" class="ghost"
+                        th:if="${!#lists.isEmpty(transcript)}">New chat</button>
+            </div>
+
+            <div class="empty" th:if="${#lists.isEmpty(transcript)}">
+                No messages yet — the agent will remember every turn you send.
+            </div>
+
+            <div th:each="m : ${transcript}" class="turn"
+                 th:classappend="${m.user} ? 'user' : 'assistant'">
+                <div class="turnhead">
+                    <span class="who" th:text="${m.user} ? 'you' : 'agent'"></span>
+                    <span class="mstats" th:if="${m.stats != null}">
+                        <span th:if="${m.user}">
+                            prompt <b th:text="${m.stats.promptTokens}">0</b> tok
+                        </span>
+                        <span th:unless="${m.user}">
+                            completion <b th:text="${m.stats.completionTokens}">0</b> ·
+                            turn total <b th:text="${m.stats.totalTokens}">0</b> ·
+                            <b th:text="${m.stats.latencyMillis} + ' ms'">0 ms</b> ·
+                            <span th:text="${m.stats.model}"></span>
+                            <span th:if="${!#strings.isEmpty(m.stats.finishReason)}"
+                                  th:text="' · ' + ${m.stats.finishReason}"></span>
+                        </span>
+                    </span>
+                </div>
+                <div class="body" th:text="${m.content}"></div>
+            </div>
+        </div>
+
+        <!-- 3. Input -->
+        <div class="card">
+            <div class="field">
+                <label for="userInput">Your message</label>
+                <textarea id="userInput" name="userInput" rows="4" autofocus
+                          placeholder="Ask anything — the agent remembers the turns above…"
+                          th:text="${form.userInput}"></textarea>
+            </div>
+            <button type="submit">Send</button>
+        </div>
     </form>
+
+    <!-- Sibling form: HTML forbids nesting, so the New chat button targets it by id. -->
+    <form id="resetForm" method="post" action="/reset"></form>
 
     <div class="card error" th:if="${error}">
         <h2>Something went wrong</h2>
@@ -164,7 +197,6 @@
 
     <div class="card" th:if="${result}">
         <h2>Last turn</h2>
-
         <div class="usage">
             <span class="pill">prompt <b th:text="${result.usage.promptTokens}">0</b></span>
             <span class="pill">completion <b th:text="${result.usage.completionTokens}">0</b></span>

@@ -2,6 +2,7 @@ package com.crispyland.agent;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 import com.crispyland.agent.judge.NoOpJudge;
 import com.crispyland.agent.llm.ChatRequest;
@@ -46,11 +47,13 @@ class AgentTest {
         agent.handle("c1", "my name is Nur", null);
         agent.handle("c1", "what is my name?", null);
 
-        assertThat(client.last.messages()).containsExactly(
-                Message.system("be brief"),
-                Message.user("my name is Nur"),
-                Message.assistant("reply 1"),
-                Message.user("what is my name?"));
+        assertThat(client.last.messages())
+                .extracting(Message::role, Message::content)
+                .containsExactly(
+                        tuple("system", "be brief"),
+                        tuple("user", "my name is Nur"),
+                        tuple("assistant", "reply 1"),
+                        tuple("user", "what is my name?"));
     }
 
     @Test
@@ -58,9 +61,9 @@ class AgentTest {
         agent.handle("alice", "hello from alice", null);
         agent.handle("bob", "hello from bob", null);
 
-        assertThat(client.last.messages()).containsExactly(
-                Message.system("be brief"),
-                Message.user("hello from bob"));
+        assertThat(client.last.messages())
+                .extracting(Message::role, Message::content)
+                .containsExactly(tuple("system", "be brief"), tuple("user", "hello from bob"));
         assertThat(agent.transcript("alice")).hasSize(2);
     }
 
@@ -70,8 +73,23 @@ class AgentTest {
         windowed.handle("c1", "first", null);
         windowed.handle("c1", "second", null);
 
-        assertThat(windowed.transcript("c1")).containsExactly(
-                Message.user("second"), Message.assistant("reply 2"));
+        assertThat(windowed.transcript("c1"))
+                .extracting(Message::role, Message::content)
+                .containsExactly(tuple("user", "second"), tuple("assistant", "reply 2"));
+    }
+
+    @Test
+    void eachStoredMessageCarriesItsShareOfTheTurn() {
+        agent.handle("c1", "hello", null);
+        List<Message> transcript = agent.transcript("c1");
+
+        // The user message owns the prompt tokens, the assistant message the completion.
+        assertThat(transcript.get(0).stats().promptTokens()).isEqualTo(10);
+        assertThat(transcript.get(0).stats().completionTokens()).isZero();
+        assertThat(transcript.get(1).stats().completionTokens()).isEqualTo(5);
+        assertThat(transcript.get(1).stats().totalTokens()).isEqualTo(15);
+        assertThat(transcript.get(1).stats().model()).isEqualTo("openai/gpt-oss-20b");
+        assertThat(transcript.get(1).stats().finishReason()).isEqualTo("stop");
     }
 
     @Test
@@ -98,8 +116,9 @@ class AgentTest {
 
         assertThatThrownBy(() -> agent.handle("c1", "doomed turn", null))
                 .isInstanceOf(LlmException.class);
-        assertThat(agent.transcript("c1")).containsExactly(
-                Message.user("good turn"), Message.assistant("reply 1"));
+        assertThat(agent.transcript("c1"))
+                .extracting(Message::role, Message::content)
+                .containsExactly(tuple("user", "good turn"), tuple("assistant", "reply 1"));
     }
 
     @Test

@@ -7,6 +7,7 @@ import com.crispyland.agent.llm.ChatResponse;
 import com.crispyland.agent.llm.LlmClient;
 import com.crispyland.agent.memory.ConversationStore;
 import com.crispyland.agent.memory.Message;
+import com.crispyland.agent.memory.MessageStats;
 import com.crispyland.agent.policy.InputPolicy;
 import com.crispyland.agent.policy.OutputPolicy;
 import com.crispyland.agent.usage.TokenUsage;
@@ -79,8 +80,13 @@ public class Agent {
         Verdict verdict = judge.judge(prompt, answer, effective);
 
         // Committed only after the reply survives the output policy, so a failed turn
-        // never poisons the history.
-        conversations.append(id, List.of(Message.user(prompt), Message.assistant(answer)));
+        // never poisons the history. Each message keeps the share of the turn it earned.
+        conversations.append(id, List.of(
+                Message.user(prompt).withStats(
+                        MessageStats.forPrompt(usage.promptTokens(), effective.model())),
+                Message.assistant(answer).withStats(
+                        MessageStats.forCompletion(usage.completionTokens(), usage.totalTokens(),
+                                latencyMillis, effective.model(), response.finishReason()))));
 
         return new AgentResult(answer, effective, usage, cumulative,
                 response.finishReason(), latencyMillis, verdict, conversations.history(id));

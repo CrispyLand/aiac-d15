@@ -59,6 +59,15 @@
         .meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
         h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
              color: var(--muted); margin: 0 0 10px; }
+        .turn { padding: 12px 14px; border-radius: 9px; margin-bottom: 10px; white-space: pre-wrap; }
+        .turn.user { background: #eef1fb; border: 1px solid #d8e0f7; }
+        .turn.assistant { background: #f7f8fa; border: 1px solid var(--line); }
+        .who { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+               letter-spacing: .05em; color: var(--muted); margin-bottom: 5px; }
+        .bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+        .ghost { background: transparent; color: var(--muted); border: 1px solid var(--line);
+                 padding: 6px 12px; font-size: 12px; font-weight: 600; }
+        .ghost:hover { background: #f1f3f5; color: var(--ink); }
     </style>
 </head>
 <body>
@@ -66,14 +75,30 @@
     <h1>Agent Chat</h1>
     <div class="sub">Spring Boot &rarr; <code>com.crispyland.agent</code> &rarr; Groq chat completions</div>
 
+    <div class="card" th:if="${!#lists.isEmpty(transcript)}">
+        <div class="bar">
+            <h2 style="margin:0">Conversation
+                <span th:text="'· ' + ${#lists.size(transcript)} + ' messages'"></span></h2>
+            <form method="post" action="/reset" style="margin:0">
+                <button type="submit" class="ghost">New chat</button>
+            </form>
+        </div>
+        <div th:each="m : ${transcript}" class="turn"
+             th:classappend="${m.user} ? 'user' : 'assistant'">
+            <span class="who" th:text="${m.user} ? 'you' : 'agent'"></span>
+            <span th:text="${m.content}"></span>
+        </div>
+    </div>
+
     <form method="post" action="/">
         <div class="card">
             <div class="field">
-                <label for="userInput">Your question</label>
+                <label for="userInput">Your message</label>
                 <textarea id="userInput" name="userInput" rows="4" autofocus
-                          placeholder="Ask anything…" th:text="${form.userInput}"></textarea>
+                          placeholder="Ask anything — the agent remembers the turns above…"
+                          th:text="${form.userInput}"></textarea>
             </div>
-            <button type="submit">Ask the agent</button>
+            <button type="submit">Send</button>
         </div>
 
         <div class="card">
@@ -103,8 +128,9 @@
                     <div class="field">
                         <label for="reasoningEffort">Reasoning effort</label>
                         <select id="reasoningEffort" name="reasoningEffort">
-                            <option th:each="e : ${ {'low','medium','high'} }" th:value="${e}"
-                                    th:text="${e}" th:selected="${e == form.reasoningEffort}"></option>
+                            <option th:each="e : ${reasoningEfforts}" th:value="${e}"
+                                    th:text="${e.isEmpty()} ? '(omit — for non-gpt-oss models)' : ${e}"
+                                    th:selected="${e == form.reasoningEffort}"></option>
                         </select>
                     </div>
                 </div>
@@ -137,8 +163,7 @@
     </div>
 
     <div class="card" th:if="${result}">
-        <h2>Answer</h2>
-        <div class="answer" th:text="${result.answer}"></div>
+        <h2>Last turn</h2>
 
         <div class="usage">
             <span class="pill">prompt <b th:text="${result.usage.promptTokens}">0</b></span>

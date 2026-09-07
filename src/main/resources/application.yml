@@ -17,18 +17,30 @@ agent:
   connect-timeout: 10s
   read-timeout: 120s
 
-  # Offered in the model dropdown on the page.
+  # Offered in the model dropdown on the page (must match what your key can access:
+  # GET https://api.groq.com/openai/v1/models).
   available-models:
     - openai/gpt-oss-20b
     - openai/gpt-oss-120b
-    - llama-3.3-70b-versatile
+    - qwen/qwen3.8-27b
+    - qwen/qwen3.6-27b
+    - groq/compound-mini
+
+  # Offered in the reasoning-effort dropdown. "" means omit the parameter entirely —
+  # required for models that don't support it (qwen, compound, allam).
+  reasoning-efforts:
+    - ""
+    - low
+    - medium
+    - high
 
   defaults:
     model: openai/gpt-oss-20b
     system-prompt: "You are a concise, helpful assistant. Answer directly and avoid filler."
     temperature: 1.0
     max-completion-tokens: 1024
-    reasoning-effort: medium        # low | medium | high
+    reasoning-effort: ""            # "" = omit (works on every model) | low | medium | high
+                                    # only openai/gpt-oss-* accept low|medium|high
     stop-sequences: []              # e.g. ["\n\n", "END"]
     response-schema: ""             # optional JSON schema -> forces structured output
 
@@ -37,6 +49,12 @@ agent:
 
   output-policy:
     max-length: 0                   # 0 = unlimited
+
+  memory:
+    # Rolling window over the dialogue, counted in messages (1 turn = 2 messages).
+    # Older turns drop off so the prompt cannot grow without bound. 0 = keep everything.
+    # The system prompt is not stored — it is re-applied fresh on every turn.
+    max-messages: 20
 
 logging:
   level:

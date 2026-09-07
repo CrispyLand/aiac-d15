@@ -4,6 +4,8 @@ import com.crispyland.agent.judge.Judge;
 import com.crispyland.agent.judge.NoOpJudge;
 import com.crispyland.agent.llm.GroqLlmClient;
 import com.crispyland.agent.llm.LlmClient;
+import com.crispyland.agent.memory.ConversationStore;
+import com.crispyland.agent.memory.InMemoryConversationStore;
 import com.crispyland.agent.policy.DefaultInputPolicy;
 import com.crispyland.agent.policy.DefaultOutputPolicy;
 import com.crispyland.agent.policy.InputPolicy;
@@ -56,5 +58,11 @@ public class AgentConfiguration {
     @ConditionalOnMissingBean
     public TokenUsageTracker tokenUsageTracker() {
         return new TokenUsageTracker();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ConversationStore conversationStore(AgentProperties properties) {
+        return new InMemoryConversationStore(properties.memory().maxMessages());
     }
 }

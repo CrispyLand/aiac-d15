@@ -15,9 +15,11 @@ public record AgentProperties(
         Duration connectTimeout,
         Duration readTimeout,
         List<String> availableModels,
+        List<String> reasoningEfforts,
         Defaults defaults,
         Limit inputPolicy,
-        Limit outputPolicy) {
+        Limit outputPolicy,
+        Memory memory) {
 
     /** Per-request parameter defaults used whenever the caller does not supply a value. */
     public record Defaults(
@@ -44,5 +46,9 @@ public record AgentProperties(
 
     /** A character limit; {@code 0} means unlimited. */
     public record Limit(int maxLength) {
+    }
+
+    /** Conversation retention; {@code maxMessages <= 0} keeps the whole dialogue. */
+    public record Memory(int maxMessages) {
     }
 }

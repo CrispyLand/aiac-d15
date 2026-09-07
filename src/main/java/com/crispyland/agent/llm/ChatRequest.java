@@ -1,5 +1,6 @@
 package com.crispyland.agent.llm;
 
+import com.crispyland.agent.memory.Message;
 import java.util.List;
 
 /**
@@ -18,16 +19,5 @@ public record ChatRequest(
     public ChatRequest {
         messages = List.copyOf(messages);
         stopSequences = (stopSequences == null) ? List.of() : List.copyOf(stopSequences);
-    }
-
-    public record Message(String role, String content) {
-
-        public static Message system(String content) {
-            return new Message("system", content);
-        }
-
-        public static Message user(String content) {
-            return new Message("user", content);
-        }
     }
 }

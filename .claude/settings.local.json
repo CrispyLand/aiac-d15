@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(mvn -v)",
-      "Bash(mvn -B dependency:tree)"
+      "Bash(mvn -B dependency:tree)",
+      "Bash(mvn -B test)"
     ]
   }
 }

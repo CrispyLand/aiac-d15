@@ -1,5 +1,6 @@
 package com.crispyland.agent.llm;
 
+import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.usage.TokenUsage;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -66,7 +67,7 @@ public class GroqLlmClient implements LlmClient {
         root.put("model", request.model());
 
         ArrayNode messages = root.putArray("messages");
-        for (ChatRequest.Message message : request.messages()) {
+        for (Message message : request.messages()) {
             ObjectNode node = messages.addObject();
             node.put("role", message.role());
             node.put("content", message.content());

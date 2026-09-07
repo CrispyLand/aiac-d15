@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: agent-chat
+  thymeleaf:
+    cache: false
+
+server:
+  port: 8080
+
+# ---------------------------------------------------------------------------
+# Everything the agent does is tunable from here. The page may override any of
+# the `defaults` per request; whatever it leaves empty falls back to these.
+# ---------------------------------------------------------------------------
+agent:
+  api-key: ${GROQ_API_KEY:}                                   # never hardcode the key
+  endpoint: https://api.groq.com/openai/v1/chat/completions
+  connect-timeout: 10s
+  read-timeout: 120s
+
+  # Offered in the model dropdown on the page.
+  available-models:
+    - openai/gpt-oss-20b
+    - openai/gpt-oss-120b
+    - llama-3.3-70b-versatile
+
+  defaults:
+    model: openai/gpt-oss-20b
+    system-prompt: "You are a concise, helpful assistant. Answer directly and avoid filler."
+    temperature: 1.0
+    max-completion-tokens: 1024
+    reasoning-effort: medium        # low | medium | high
+    stop-sequences: []              # e.g. ["\n\n", "END"]
+    response-schema: ""             # optional JSON schema -> forces structured output
+
+  input-policy:
+    max-length: 8000                # 0 = unlimited
+
+  output-policy:
+    max-length: 0                   # 0 = unlimited
+
+logging:
+  level:
+    com.crispyland: INFO

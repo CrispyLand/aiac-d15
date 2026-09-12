@@ -58,6 +58,19 @@
         .meta { font-size: 12px; color: var(--muted); margin-top: 10px; }
         h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
              color: var(--muted); margin: 0 0 10px; }
+        /* Fixed-size chat window — the conversation scrolls inside it. */
+        .stream {
+            height: 420px;
+            overflow-y: scroll;
+            scrollbar-gutter: stable;
+            padding: 2px 12px 2px 2px;
+            border-top: 1px solid var(--line);
+            border-bottom: 1px solid var(--line);
+        }
+        .stream::-webkit-scrollbar { width: 10px; }
+        .stream::-webkit-scrollbar-track { background: #f1f3f5; border-radius: 5px; }
+        .stream::-webkit-scrollbar-thumb { background: #c4cad3; border-radius: 5px; }
+        .stream::-webkit-scrollbar-thumb:hover { background: #aab2bd; }
         .turn { padding: 12px 14px; border-radius: 9px; margin-bottom: 10px; }
         .turn.user { background: #eef1fb; border: 1px solid #d8e0f7; }
         .turn.assistant { background: #f7f8fa; border: 1px solid var(--line); }
@@ -74,6 +87,7 @@
                  padding: 6px 12px; font-size: 12px; font-weight: 600; }
         .ghost:hover { background: #f1f3f5; color: var(--ink); }
         .empty { color: var(--muted); font-size: 13px; }
+        .hint { text-transform: none; letter-spacing: 0; font-weight: 400; color: #9aa1ab; }
     </style>
 </head>
 <body>
@@ -149,6 +163,7 @@
                         th:if="${!#lists.isEmpty(transcript)}">New chat</button>
             </div>
 
+            <div class="stream" id="stream">
             <div class="empty" th:if="${#lists.isEmpty(transcript)}">
                 No messages yet — the agent will remember every turn you send.
             </div>
@@ -173,12 +188,14 @@
                 </div>
                 <div class="body" th:text="${m.content}"></div>
             </div>
+            </div>
         </div>
 
         <!-- 3. Input -->
         <div class="card">
             <div class="field">
-                <label for="userInput">Your message</label>
+                <label for="userInput">Your message
+                    <span class="hint">— Enter to send, Shift+Enter for a new line</span></label>
                 <textarea id="userInput" name="userInput" rows="4" autofocus
                           placeholder="Ask anything — the agent remembers the turns above…"
                           th:text="${form.userInput}"></textarea>
@@ -213,5 +230,22 @@
         </div>
     </div>
 </div>
+
+<script>
+    // Keep the newest message in view — the window is fixed height, so a fresh reply
+    // would otherwise land below the fold.
+    var stream = document.getElementById('stream');
+    if (stream) { stream.scrollTop = stream.scrollHeight; }
+
+    // Enter sends, Shift+Enter inserts a newline.
+    document.getElementById('userInput').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+            e.preventDefault();
+            if (this.value.trim() !== '') {
+                this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit();
+            }
+        }
+    });
+</script>
 </body>
 </html>

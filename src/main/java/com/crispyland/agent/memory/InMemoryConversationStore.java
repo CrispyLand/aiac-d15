@@ -1,6 +1,5 @@
 package com.crispyland.agent.memory;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,12 +28,8 @@ public class InMemoryConversationStore implements ConversationStore {
         if (messages == null || messages.isEmpty()) {
             return;
         }
-        conversations.compute(conversationId, (key, existing) -> {
-            List<Message> updated = new ArrayList<>(existing == null ? List.of() : existing);
-            updated.addAll(messages);
-            int excess = (maxMessages > 0) ? updated.size() - maxMessages : 0;
-            return excess > 0 ? new ArrayList<>(updated.subList(excess, updated.size())) : updated;
-        });
+        conversations.compute(conversationId,
+                (key, existing) -> Conversations.appendTrimmed(existing, messages, maxMessages));
     }
 
     @Override

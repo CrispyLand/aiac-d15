@@ -1,5 +1,8 @@
 target/
 !.mvn/wrapper/maven-wrapper.jar
+
+### Persisted conversation history — contains real user messages
+/data/
 !**/src/main/**/target/
 !**/src/test/**/target/
 .kotlin

@@ -6,11 +6,13 @@ import com.crispyland.agent.llm.GroqLlmClient;
 import com.crispyland.agent.llm.LlmClient;
 import com.crispyland.agent.memory.ConversationStore;
 import com.crispyland.agent.memory.InMemoryConversationStore;
+import com.crispyland.agent.memory.JsonFileConversationStore;
 import com.crispyland.agent.policy.DefaultInputPolicy;
 import com.crispyland.agent.policy.DefaultOutputPolicy;
 import com.crispyland.agent.policy.InputPolicy;
 import com.crispyland.agent.policy.OutputPolicy;
 import com.crispyland.agent.usage.TokenUsageTracker;
+import java.nio.file.Path;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -60,9 +62,17 @@ public class AgentConfiguration {
         return new TokenUsageTracker();
     }
 
+    /**
+     * {@code json} keeps the dialogue across restarts; anything else forgets it on shutdown.
+     */
     @Bean
     @ConditionalOnMissingBean
     public ConversationStore conversationStore(AgentProperties properties) {
-        return new InMemoryConversationStore(properties.memory().maxMessages());
+        AgentProperties.Memory memory = properties.memory();
+        if (AgentProperties.Memory.JSON.equalsIgnoreCase(memory.store())) {
+            return new JsonFileConversationStore(JsonMapper.builder().build(),
+                    Path.of(memory.file()), memory.maxMessages());
+        }
+        return new InMemoryConversationStore(memory.maxMessages());
     }
 }

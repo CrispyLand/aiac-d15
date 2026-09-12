@@ -48,7 +48,15 @@ public record AgentProperties(
     public record Limit(int maxLength) {
     }
 
-    /** Conversation retention; {@code maxMessages <= 0} keeps the whole dialogue. */
-    public record Memory(int maxMessages) {
+    /**
+     * Conversation retention and where the dialogue lives.
+     *
+     * @param maxMessages rolling window size; {@code <= 0} keeps the whole dialogue
+     * @param store       {@code json} to survive restarts, {@code memory} to forget on shutdown
+     * @param file        path to the JSON history, used only when {@code store} is {@code json}
+     */
+    public record Memory(int maxMessages, String store, String file) {
+
+        public static final String JSON = "json";
     }
 }

@@ -56,6 +56,11 @@ agent:
     # The system prompt is not stored — it is re-applied fresh on every turn.
     max-messages: 20
 
+    # json = the dialogue is written to disk and reloaded on startup, so a restart is
+    # invisible to the user. memory = kept in RAM only, forgotten on shutdown.
+    store: json
+    file: ./data/conversations.json
+
 logging:
   level:
     com.crispyland: INFO

@@ -102,6 +102,31 @@ class AgentTest {
     }
 
     @Test
+    void systemMessageIsRebuiltOnceAtPositionZeroEveryTurn() {
+        agent.handle("c1", "turn one", null);
+        printRoles(1);
+        agent.handle("c1", "turn two", null);
+        printRoles(2);
+        // System prompt edited on the page mid-conversation.
+        agent.handle("c1", "turn three", AgentConfig.builder().systemPrompt("be a pirate").build());
+        printRoles(3);
+
+        List<Message> sent = client.last.messages();
+        assertThat(sent).extracting(Message::role)
+                .containsExactly("system", "user", "assistant", "user", "assistant", "user");
+        assertThat(sent).filteredOn(m -> Message.SYSTEM.equals(m.role())).hasSize(1);
+        // Rewritten in place with the new value, not appended as a second system message.
+        assertThat(sent.get(0).content()).isEqualTo("be a pirate");
+        assertThat(agent.transcript("c1")).noneMatch(m -> Message.SYSTEM.equals(m.role()));
+    }
+
+    private void printRoles(int turn) {
+        System.out.println("  turn " + turn + " outgoing roles: "
+                + client.last.messages().stream().map(Message::role).toList()
+                + "  (system content: \"" + client.last.messages().get(0).content() + "\")");
+    }
+
+    @Test
     void resetClearsTheDialogue() {
         agent.handle("c1", "hello", null);
         agent.reset("c1");
@@ -144,7 +169,7 @@ class AgentTest {
                 new AgentProperties.Defaults("openai/gpt-oss-20b", "be brief", 1.0, 256,
                         "", List.of(), ""),
                 new AgentProperties.Limit(100), new AgentProperties.Limit(0),
-                new AgentProperties.Memory(20));
+                new AgentProperties.Memory(20, "memory", ""));
     }
 
     private static final class ScriptedClient implements LlmClient {

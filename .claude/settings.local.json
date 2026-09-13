@@ -7,7 +7,18 @@
       "Bash(curl -s -c jar.txt -b jar.txt -X POST localhost:8081/ --data-urlencode 'userInput=What is my name and my favourite colour?' -d 'model=openai/gpt-oss-20b' -d 'temperature=1.0' -d 'maxCompletionTokens=1024')",
       "Bash(pkill -f \"server.port=8081\")",
       "Bash(lsof -nP -iTCP:8080 -sTCP:LISTEN)",
-      "Bash(awk '{print $1, $2}')"
+      "Bash(awk '{print $1, $2}')",
+      "Bash(./mvnw -q -o compile)",
+      "Bash(./mvnw -q compile)",
+      "Bash(mvn -q compile)",
+      "Bash(mvn -q test)",
+      "Bash(mvn test:*)",
+      "Bash(curl -s -c /tmp/d8.jar http://localhost:8080/)",
+      "Bash(curl -s -b jar.txt http://localhost:8080/)",
+      "Bash(python3 -c ':*)",
+      "Bash(curl -s -b jar.txt -c jar.txt -X POST http://localhost:8080/ --data-urlencode \"userInput=hi\" --data \"model=openai/gpt-oss-20b\" --data \"temperature=0.7\" --data \"maxCompletionTokens=70000\" --data \"systemPrompt=x\" --data \"reasoningEffort=low\" --data \"topP=1.0\")",
+      "Bash(pkill -f \"spring-boot:run\")",
+      "Bash(lsof -ti:8080)"
     ]
   }
 }

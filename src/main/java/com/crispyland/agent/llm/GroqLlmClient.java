@@ -57,9 +57,31 @@ public class GroqLlmClient implements LlmClient {
         String body = response.getBody();
         if (!response.getStatusCode().is2xxSuccessful()) {
             throw new LlmException("Groq returned HTTP %s: %s"
-                    .formatted(response.getStatusCode().value(), summarize(body)));
+                    .formatted(response.getStatusCode().value(), describeError(body)));
         }
         return parse(body);
+    }
+
+    /**
+     * Error bodies are {@code {"error": {"message": ..., "code": ...}}}. Lifting the message
+     * out matters most for {@code context_length_exceeded}: that is the provider telling you
+     * the prompt did not fit, and it is worth reading rather than scrolling past as JSON.
+     */
+    private String describeError(String body) {
+        if (body == null || body.isBlank()) {
+            return "<empty body>";
+        }
+        try {
+            JsonNode error = mapper.readTree(body).path("error");
+            String message = text(error.path("message"));
+            if (!message.isBlank()) {
+                String code = text(error.path("code"));
+                return code.isBlank() ? message : message + " [" + code + "]";
+            }
+        } catch (JacksonException e) {
+            // Not JSON — fall through and show whatever came back.
+        }
+        return summarize(body);
     }
 
     private ObjectNode toJson(ChatRequest request) {

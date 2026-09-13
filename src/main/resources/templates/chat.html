@@ -88,6 +88,48 @@
         .ghost:hover { background: #f1f3f5; color: var(--ink); }
         .empty { color: var(--muted); font-size: 13px; }
         .hint { text-transform: none; letter-spacing: 0; font-weight: 400; color: #9aa1ab; }
+
+        /* Context window meter — one bar, drawn to scale against the model's limit. */
+        .track {
+            display: flex; height: 14px; border-radius: 7px; overflow: hidden;
+            background: #eef0f3; border: 1px solid var(--line); margin-bottom: 12px;
+        }
+        .seg { height: 100%; }
+        .seg.sys { background: #7048e8; }
+        .seg.hist { background: #3b5bdb; }
+        .seg.input { background: #22b8cf; }
+        .seg.tmpl { background: #f76707; }
+        .seg.reserved { background: repeating-linear-gradient(45deg,
+                        #ced4da, #ced4da 4px, #e9ecef 4px, #e9ecef 8px); }
+        .seg.free { flex: 1; }
+        .key { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted);
+               font-variant-numeric: tabular-nums; }
+        .key span { display: flex; align-items: center; gap: 6px; }
+        .key i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+        .key b { color: var(--ink); }
+        .gauge { font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 600; }
+        .gauge.ok { color: #2f9e44; }
+        .gauge.warn { color: #e8590c; }
+        .gauge.over { color: #e03131; }
+        .note { font-size: 12px; border-radius: 7px; padding: 9px 12px; margin-top: 12px; }
+        .note.warn { background: #fff4e6; color: #9c4221; border: 1px solid #ffd8a8; }
+        .note.over { background: #fff5f5; color: #a12a2a; border: 1px solid #ffc9c9; }
+        .note.info { background: #f1f3f5; color: #495057; border: 1px solid var(--line); }
+
+        /* Growth table — one row per turn, the bar scaled to the largest prompt so far. */
+        .growth { width: 100%; border-collapse: collapse; font-size: 12px;
+                  font-variant-numeric: tabular-nums; }
+        .growth th { text-align: right; font-weight: 600; color: var(--muted);
+                     text-transform: uppercase; letter-spacing: .04em; font-size: 11px;
+                     padding: 0 0 8px; border-bottom: 1px solid var(--line); }
+        .growth th:first-child, .growth th.wide { text-align: left; }
+        .growth td { text-align: right; padding: 7px 0; border-bottom: 1px solid #f1f3f5; }
+        .growth td:first-child { text-align: left; color: var(--muted); }
+        .growth td.wide { text-align: left; width: 40%; padding-left: 14px; }
+        .growth tr:last-child td { border-bottom: 0; }
+        .growth b { color: var(--ink); }
+        .climb { display: block; height: 9px; border-radius: 5px; background: #3b5bdb; min-width: 2px; }
+        .climb.cut { background: #e03131; }
     </style>
 </head>
 <body>
@@ -191,7 +233,62 @@
             </div>
         </div>
 
-        <!-- 3. Input -->
+        <!-- 3. Context window — what the next call will cost, before it is made -->
+        <div class="card" th:if="${budget}">
+            <div class="bar">
+                <h2 style="margin:0">Context window</h2>
+                <span class="gauge" th:classappend="${budget.status}"
+                      th:text="${budget.usedPercent} + '% of ' +
+                               ${#numbers.formatInteger(budget.contextWindow, 1, 'COMMA')} + ' tokens'">0%</span>
+            </div>
+
+            <div class="track">
+                <span class="seg sys" th:style="'width:' + ${budget.systemPercent} + '%'"></span>
+                <span class="seg hist" th:style="'width:' + ${budget.historyPercent} + '%'"></span>
+                <span class="seg input" th:style="'width:' + ${budget.inputPercent} + '%'"></span>
+                <span class="seg tmpl" th:style="'width:' + ${budget.overheadPercent} + '%'"></span>
+                <span class="seg reserved" th:style="'width:' + ${budget.reservedPercent} + '%'"></span>
+                <span class="seg free"></span>
+            </div>
+
+            <div class="key">
+                <span><i style="background:#7048e8"></i>system prompt
+                      <b th:text="${#numbers.formatInteger(budget.systemTokens, 1, 'COMMA')}">0</b></span>
+                <span><i style="background:#3b5bdb"></i>history
+                      <b th:text="${#numbers.formatInteger(budget.historyTokens, 1, 'COMMA')}">0</b></span>
+                <span th:if="${budget.inputTokens > 0}"><i style="background:#22b8cf"></i>new message
+                      <b th:text="${#numbers.formatInteger(budget.inputTokens, 1, 'COMMA')}">0</b></span>
+                <span><i style="background:#f76707"></i>chat template
+                      <b th:text="${#numbers.formatInteger(budget.overheadTokens, 1, 'COMMA')}">0</b></span>
+                <span><i style="background:#ced4da"></i>reserved for reply
+                      <b th:text="${#numbers.formatInteger(budget.reservedCompletionTokens, 1, 'COMMA')}">0</b></span>
+                <span><i style="background:#eef0f3;border:1px solid #ced4da"></i>free
+                      <b th:text="${#numbers.formatInteger(budget.remainingTokens, 1, 'COMMA')}">0</b></span>
+            </div>
+
+            <div class="note over" th:if="${budget.overflowing}">
+                Over the window by
+                <b th:text="${#numbers.formatInteger(-budget.remainingTokens, 1, 'COMMA')}">0</b> tokens.
+                The prompt and the reserved reply cannot both fit — every turn from here fails
+                until the dialogue is reset or <code>max completion tokens</code> comes down.
+            </div>
+            <div class="note warn" th:if="${budget.warning}">
+                Past the warning line. History is re-sent in full on every call, so the cost of
+                each turn keeps climbing even if your messages stay short.
+            </div>
+            <div class="note info" th:if="${budget.trimmed}">
+                Trim policy dropped the
+                <b th:text="${budget.droppedMessages}">0</b> oldest message(s) to make this call fit —
+                the agent no longer remembers them.
+            </div>
+            <div class="note info" th:unless="${budget.calibrated}">
+                First call on <b th:text="${budget.model}"></b> — the provider's chat template has
+                not been measured yet, so the estimate below it is low. It corrects itself from
+                the next turn's reported <code>prompt_tokens</code>.
+            </div>
+        </div>
+
+        <!-- 4. Input -->
         <div class="card">
             <div class="field">
                 <label for="userInput">Your message
@@ -227,6 +324,63 @@
             <span th:if="${result.verdict.scored}">
                 · judge: <span th:text="${result.verdict.score}"></span>
             </span>
+        </div>
+
+        <!-- The estimate is only trustworthy if it is checked against the bill. -->
+        <div class="meta">
+            pre-flight estimate <b th:text="${#numbers.formatInteger(result.budget.promptTokens, 1, 'COMMA')}">0</b>
+            · Groq actual <b th:text="${#numbers.formatInteger(result.usage.promptTokens, 1, 'COMMA')}">0</b>
+            · drift <b th:text="${#numbers.formatDecimal(result.promptTokenDriftPercent(), 1, 1)} + '%'">0%</b>
+        </div>
+
+        <div class="note over" th:if="${result.truncated()}">
+            The reply stopped at <code>max completion tokens</code>, not at the end of a thought —
+            <b th:text="${result.usage.completionTokens}">0</b> tokens and cut off mid-sentence.
+            The call still succeeded and was still billed; nothing but
+            <code>finish_reason: length</code> says the answer is incomplete.
+        </div>
+    </div>
+
+    <!-- Cost over the dialogue — the whole point of the day, drawn from the stored per-message stats. -->
+    <div class="card" th:if="${!#lists.isEmpty(turns)}"
+         th:with="last=${turns.get(#lists.size(turns) - 1)}">
+        <div class="bar">
+            <h2 style="margin:0">Cost over the dialogue</h2>
+            <span class="gauge" th:text="${#numbers.formatInteger(last.runningTotal, 1, 'COMMA')}
+                                         + ' tokens across ' + ${#lists.size(turns)} + ' turns'">0</span>
+        </div>
+
+        <table class="growth">
+            <tr>
+                <th>Turn</th>
+                <th>Prompt</th>
+                <th>Reply</th>
+                <th>Turn total</th>
+                <th>Running total</th>
+                <th>Latency</th>
+                <th class="wide">Prompt, to scale</th>
+            </tr>
+            <tr th:each="t : ${turns}">
+                <td th:text="'#' + ${t.turn}">#1</td>
+                <td><b th:text="${#numbers.formatInteger(t.promptTokens, 1, 'COMMA')}">0</b></td>
+                <td th:text="${#numbers.formatInteger(t.completionTokens, 1, 'COMMA')}">0</td>
+                <td th:text="${#numbers.formatInteger(t.totalTokens, 1, 'COMMA')}">0</td>
+                <td><b th:text="${#numbers.formatInteger(t.runningTotal, 1, 'COMMA')}">0</b></td>
+                <td th:text="${t.latencyMillis} + ' ms'">0 ms</td>
+                <td class="wide">
+                    <i class="climb" th:classappend="${t.truncated()} ? 'cut'"
+                       th:style="'width:' + ${t.barPercent} + '%'"
+                       th:title="${t.model} + ' · finish: ' + ${t.finishReason}"></i>
+                </td>
+            </tr>
+        </table>
+
+        <div class="note info">
+            The <b>prompt</b> column is the one to watch. Your messages do not get longer, but the
+            whole history is re-sent on every call, so each turn pays for every turn before it —
+            the cost of a conversation grows with the square of its length, not in a straight line.
+            The running total only covers the turns still retained; anything the message window or
+            the trim policy dropped is gone from the transcript and from this table.
         </div>
     </div>
 </div>

@@ -14,22 +14,35 @@ import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.policy.DefaultInputPolicy;
 import com.crispyland.agent.policy.DefaultOutputPolicy;
 import com.crispyland.agent.policy.PolicyViolationException;
+import com.crispyland.agent.usage.BpeTokenCounter;
+import com.crispyland.agent.usage.OverflowPolicy;
+import com.crispyland.agent.usage.TemplateOverhead;
 import com.crispyland.agent.usage.TokenUsage;
 import com.crispyland.agent.usage.TokenUsageTracker;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /** The agent is testable with no Spring context and no network — that is the point of the boundary. */
 class AgentTest {
 
     private final ScriptedClient client = new ScriptedClient();
+    private final TemplateOverhead overhead = new TemplateOverhead();
     private final Agent agent = newAgent(20);
 
     private Agent newAgent(int maxMessages) {
+        return newAgent(maxMessages, planner(131_072, OverflowPolicy.FAIL));
+    }
+
+    private Agent newAgent(int maxMessages, ContextPlanner planner) {
         return new Agent(client, new DefaultInputPolicy(100), new DefaultOutputPolicy(0),
                 new NoOpJudge(), new TokenUsageTracker(),
-                new InMemoryConversationStore(maxMessages), properties());
+                new InMemoryConversationStore(maxMessages), planner, overhead, properties());
+    }
+
+    private ContextPlanner planner(int window, OverflowPolicy policy) {
+        return new ContextPlanner(new BpeTokenCounter(), overhead, Map.of(), window, policy, 0.8);
     }
 
     @Test
@@ -162,6 +175,101 @@ class AgentTest {
         assertThat(client.last).isNull();
     }
 
+    @Test
+    void everyTurnReportsWhatItWasPredictedToCost() {
+        AgentResult result = agent.handle("c1", "hello", null);
+
+        // 256 reserved for the reply is the dominant term while the dialogue is still short —
+        // the whole prompt is a rounding error next to the space held open for the answer.
+        assertThat(result.budget().reservedCompletionTokens()).isEqualTo(256);
+        assertThat(result.budget().promptTokens()).isPositive();
+        assertThat(result.budget().projectedTokens())
+                .isEqualTo(result.budget().promptTokens() + 256);
+        assertThat(result.budget().overflowing()).isFalse();
+    }
+
+    @Test
+    void historyIsThePartOfTheBudgetThatGrows() {
+        long first = agent.handle("c1", "hello", null).budget().historyTokens();
+        long second = agent.handle("c1", "hello again", null).budget().historyTokens();
+        long third = agent.handle("c1", "and again", null).budget().historyTokens();
+
+        System.out.println("  history tokens by turn: " + first + " -> " + second + " -> " + third);
+        assertThat(first).isZero();
+        assertThat(second).isGreaterThan(first);
+        assertThat(third).isGreaterThan(second);
+    }
+
+    @Test
+    void anOversizedCallIsRefusedBeforeItIsPaidFor() {
+        // 200-token window against 256 reserved for the reply: nothing can fit, ever.
+        Agent tiny = newAgent(20, planner(200, OverflowPolicy.FAIL));
+
+        assertThatThrownBy(() -> tiny.handle("c1", "hello", null))
+                .isInstanceOf(ContextOverflowException.class)
+                .hasMessageContaining("Context window exceeded");
+        // The point of a local guard: no request, no bill, no round trip.
+        assertThat(client.last).isNull();
+    }
+
+    @Test
+    void withOverflowUnguardedTheRequestIsSentAnywayForTheProviderToReject() {
+        Agent tiny = newAgent(20, planner(200, OverflowPolicy.OFF));
+
+        AgentResult result = tiny.handle("c1", "hello", null);
+
+        assertThat(client.last).isNotNull();
+        assertThat(result.budget().overflowing()).isTrue();
+        assertThat(result.budget().remainingTokens()).isNegative();
+    }
+
+    @Test
+    void trimDropsOldestTurnsUntilTheCallFits() {
+        // Window sized to hold the reserved reply, the system prompt and roughly one turn.
+        Agent tiny = newAgent(20, planner(300, OverflowPolicy.TRIM));
+        tiny.handle("c1", "the first thing I ever said in this conversation", null);
+        tiny.handle("c1", "the second thing I ever said in this conversation", null);
+        AgentResult third = tiny.handle("c1", "the third thing", null);
+
+        assertThat(third.budget().trimmed()).isTrue();
+        assertThat(third.budget().overflowing()).isFalse();
+        // Forgotten, not merely unsent: the oldest turn is gone from what the model sees.
+        assertThat(client.last.messages())
+                .extracting(Message::content)
+                .doesNotContain("the first thing I ever said in this conversation");
+        // The window still opens on a user message, never mid-turn on an assistant reply.
+        assertThat(client.last.messages().get(1).role()).isEqualTo("user");
+    }
+
+    @Test
+    void trimStillFailsWhenTheNewMessageAloneCannotFit() {
+        Agent tiny = newAgent(20, planner(260, OverflowPolicy.TRIM));
+
+        assertThatThrownBy(() -> tiny.handle("c1", "hello", null))
+                .isInstanceOf(ContextOverflowException.class);
+    }
+
+    @Test
+    void theEstimateIsHeldAgainstTheProvidersBillAndCorrectedByIt() {
+        AgentResult first = agent.handle("c1", "hello", null);
+
+        assertThat(first.promptTokenDrift())
+                .isEqualTo(first.budget().promptTokens() - first.usage().promptTokens());
+        // Nothing was known about the model's chat template before the first response.
+        assertThat(first.budget().calibrated()).isFalse();
+
+        // From the second turn on, the gap between the local count and the provider's bill
+        // has been observed and is folded into the estimate.
+        assertThat(agent.handle("c1", "hello again", null).budget().calibrated()).isTrue();
+    }
+
+    @Test
+    void aReplyCutOffAtTheTokenLimitIsFlagged() {
+        client.finishReason = "length";
+
+        assertThat(agent.handle("c1", "hello", null).truncated()).isTrue();
+    }
+
     private static AgentProperties properties() {
         return new AgentProperties("test-key", "https://example.invalid",
                 Duration.ofSeconds(1), Duration.ofSeconds(1), List.of("openai/gpt-oss-20b"),
@@ -169,12 +277,14 @@ class AgentTest {
                 new AgentProperties.Defaults("openai/gpt-oss-20b", "be brief", 1.0, 256,
                         "", List.of(), ""),
                 new AgentProperties.Limit(100), new AgentProperties.Limit(0),
-                new AgentProperties.Memory(20, "memory", ""));
+                new AgentProperties.Memory(20, "memory", ""),
+                new AgentProperties.Context(Map.of(), 131_072, OverflowPolicy.FAIL, 0.8));
     }
 
     private static final class ScriptedClient implements LlmClient {
         private ChatRequest last;
         private boolean failNext;
+        private String finishReason = "stop";
         private int calls;
 
         @Override
@@ -184,7 +294,8 @@ class AgentTest {
                 throw new LlmException("simulated outage");
             }
             this.last = request;
-            return new ChatResponse("reply " + (++calls), request.model(), "stop", new TokenUsage(10, 5, 15));
+            return new ChatResponse("reply " + (++calls), request.model(), finishReason,
+                    new TokenUsage(10, 5, 15));
         }
     }
 }

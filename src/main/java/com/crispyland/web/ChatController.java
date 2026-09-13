@@ -1,11 +1,15 @@
 package com.crispyland.web;
 
 import com.crispyland.agent.Agent;
+import com.crispyland.agent.AgentConfig;
 import com.crispyland.agent.AgentException;
 import com.crispyland.agent.AgentProperties;
 import com.crispyland.agent.AgentResult;
+import com.crispyland.agent.ContextOverflowException;
+import com.crispyland.agent.memory.Message;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import java.util.List;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.validation.BindingResult;
@@ -35,8 +39,10 @@ public class ChatController {
     public String chatPage(Model model, HttpServletRequest request, HttpServletResponse response) {
         // Resolving here also mints the cookie for a first-time visitor, before they send anything.
         String conversationId = conversationIds.resolve(request, response);
-        model.addAttribute("form", ChatForm.of("", properties.defaults().toConfig()));
-        model.addAttribute("transcript", agent.transcript(conversationId));
+        AgentConfig defaults = properties.defaults().toConfig();
+        model.addAttribute("form", ChatForm.of("", defaults));
+        addTranscript(model, agent.transcript(conversationId));
+        model.addAttribute("budget", agent.budget(conversationId, defaults));
         addOptions(model);
         return "chat";
     }
@@ -49,19 +55,27 @@ public class ChatController {
 
         if (binding.hasErrors()) {
             model.addAttribute("error", "Some parameters could not be read — check the numeric fields.");
-            model.addAttribute("transcript", agent.transcript(conversationId));
+            addTranscript(model, agent.transcript(conversationId));
+            model.addAttribute("budget", agent.budget(conversationId, properties.defaults().toConfig()));
             return "chat";
         }
 
         try {
             AgentResult result = agent.handle(conversationId, form.userInput(), form.toAgentConfig());
             model.addAttribute("result", result);
-            model.addAttribute("transcript", result.transcript());
+            addTranscript(model, result.transcript());
+            model.addAttribute("budget", agent.budget(conversationId, result.effectiveConfig()));
             // Keep the settings the agent actually used, but clear the box for the next turn.
             model.addAttribute("form", ChatForm.of("", result.effectiveConfig()));
+        } catch (ContextOverflowException e) {
+            // Show the budget that caused the refusal, not the one the dialogue merely sits at.
+            model.addAttribute("error", e.getMessage());
+            model.addAttribute("budget", e.budget());
+            addTranscript(model, agent.transcript(conversationId));
         } catch (AgentException e) {
             model.addAttribute("error", e.getMessage());
-            model.addAttribute("transcript", agent.transcript(conversationId));
+            addTranscript(model, agent.transcript(conversationId));
+            model.addAttribute("budget", agent.budget(conversationId, form.toAgentConfig()));
         }
         return "chat";
     }
@@ -71,6 +85,12 @@ public class ChatController {
     public String reset(HttpServletRequest request, HttpServletResponse response) {
         agent.reset(conversationIds.resolve(request, response));
         return "redirect:/";
+    }
+
+    /** The turn-by-turn cost series is only ever a view over the transcript — never stored twice. */
+    private void addTranscript(Model model, List<Message> transcript) {
+        model.addAttribute("transcript", transcript);
+        model.addAttribute("turns", TurnCost.series(transcript));
     }
 
     /** Dropdown contents come from application.yml, not from the template. */

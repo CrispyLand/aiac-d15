@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# Demo profile — run with --spring.profiles.active=demo
+#
+# The real window is 131,072 tokens. At that size the overflow path is unreachable
+# on camera: a dialogue of short turns grows by ~70 tokens a turn, so filling the
+# window would take well over a thousand turns. Nothing about the accounting changes
+# here — only the number the budget is measured against, so the same code paths that
+# would fire at 131,072 fire at turn five instead.
+#
+# Everything not listed below is inherited from application.yml.
+# ---------------------------------------------------------------------------
+agent:
+  defaults:
+    # Also the reserved slice of the budget: the window must hold the prompt *and*
+    # this, so raising it on the page is the fastest way to push a turn over.
+    max-completion-tokens: 150
+
+  context:
+    windows:
+      "[openai/gpt-oss-20b]": 500
+      "[openai/gpt-oss-120b]": 500
+      "[qwen/qwen3.8-27b]": 500
+      "[qwen/qwen3.6-27b]": 500
+      "[groq/compound-mini]": 500
+    default-window: 500
+
+    # Flip to `trim` to show the dialogue surviving by forgetting, or `off` to let
+    # Groq reject the call itself — note that at a 500-token pretend window `off`
+    # will simply succeed, because the real model is happy to take it.
+    overflow-policy: fail
+
+  memory:
+    # Keep the demo dialogue off the real transcript file.
+    file: ./data/conversations-demo.json

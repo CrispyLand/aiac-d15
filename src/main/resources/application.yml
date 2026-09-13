@@ -61,6 +61,28 @@ agent:
     store: json
     file: ./data/conversations.json
 
+  # The second window. max-messages above bounds the dialogue in messages; the model bills
+  # and rejects in tokens, so the prompt is priced locally before every call.
+  context:
+    # Each call must fit prompt + max-completion-tokens into this. These are the models'
+    # real limits, so overflow is unreachable by hand — see application-demo.yml for a
+    # pretend window small enough to hit on camera.
+    windows:
+      "[openai/gpt-oss-20b]": 500
+      "[openai/gpt-oss-120b]": 131072
+      "[qwen/qwen3.8-27b]": 131072
+      "[qwen/qwen3.6-27b]": 131072
+      "[groq/compound-mini]": 131072
+    default-window: 131072
+
+    # off  = send anyway and let Groq reject it (shows the raw context_length_exceeded)
+    # fail = refuse locally, before the call is paid for, and explain the arithmetic
+    # trim = drop the oldest turns until it fits, the way production assistants do
+    overflow-policy: fail
+
+    # Fraction of the window at which the page starts warning.
+    warn-at: 0.80
+
 logging:
   level:
     com.crispyland: INFO

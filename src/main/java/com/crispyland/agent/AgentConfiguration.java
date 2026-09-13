@@ -11,6 +11,9 @@ import com.crispyland.agent.policy.DefaultInputPolicy;
 import com.crispyland.agent.policy.DefaultOutputPolicy;
 import com.crispyland.agent.policy.InputPolicy;
 import com.crispyland.agent.policy.OutputPolicy;
+import com.crispyland.agent.usage.BpeTokenCounter;
+import com.crispyland.agent.usage.TemplateOverhead;
+import com.crispyland.agent.usage.TokenCounter;
 import com.crispyland.agent.usage.TokenUsageTracker;
 import java.nio.file.Path;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -60,6 +63,28 @@ public class AgentConfiguration {
     @ConditionalOnMissingBean
     public TokenUsageTracker tokenUsageTracker() {
         return new TokenUsageTracker();
+    }
+
+    /** Loaded once — the BPE vocabulary is a few megabytes and is immutable and thread-safe. */
+    @Bean
+    @ConditionalOnMissingBean
+    public TokenCounter tokenCounter() {
+        return new BpeTokenCounter();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public TemplateOverhead templateOverhead() {
+        return new TemplateOverhead();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ContextPlanner contextPlanner(TokenCounter tokenCounter, TemplateOverhead templateOverhead,
+                                         AgentProperties properties) {
+        AgentProperties.Context context = properties.context();
+        return new ContextPlanner(tokenCounter, templateOverhead, context.windows(),
+                context.defaultWindow(), context.overflowPolicy(), context.warnAt());
     }
 
     /**

@@ -68,7 +68,7 @@ agent:
     # real limits, so overflow is unreachable by hand — see application-demo.yml for a
     # pretend window small enough to hit on camera.
     windows:
-      "[openai/gpt-oss-20b]": 500
+      "[openai/gpt-oss-20b]": 131072
       "[openai/gpt-oss-120b]": 131072
       "[qwen/qwen3.8-27b]": 131072
       "[qwen/qwen3.6-27b]": 131072

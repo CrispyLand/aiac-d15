@@ -6,8 +6,10 @@ import com.crispyland.agent.llm.ChatRequest;
 import com.crispyland.agent.llm.ChatResponse;
 import com.crispyland.agent.llm.LlmClient;
 import com.crispyland.agent.memory.ConversationStore;
+import com.crispyland.agent.memory.HistoryCompressor;
 import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.memory.MessageStats;
+import com.crispyland.agent.memory.Summary;
 import com.crispyland.agent.policy.InputPolicy;
 import com.crispyland.agent.policy.OutputPolicy;
 import com.crispyland.agent.usage.ContextBudget;
@@ -22,8 +24,8 @@ import org.springframework.stereotype.Service;
 /**
  * The box. One pipeline:
  * <pre>
- *   input policy -> merge config with defaults -> load history -> price the context
- *       -> LlmClient -> record token usage -> output policy -> judge
+ *   input policy -> merge config with defaults -> load history -> compress the backlog
+ *       -> price the context -> LlmClient -> record token usage -> output policy -> judge
  *       -> append turn to history -> AgentResult
  * </pre>
  * The conversation is the agent's own state, not the web layer's: callers pass a
@@ -42,6 +44,7 @@ public class Agent {
     private final TokenUsageTracker usageTracker;
     private final ConversationStore conversations;
     private final ContextPlanner contextPlanner;
+    private final HistoryCompressor compressor;
     private final TemplateOverhead templateOverhead;
     private final AgentConfig defaults;
 
@@ -52,6 +55,7 @@ public class Agent {
                  TokenUsageTracker usageTracker,
                  ConversationStore conversations,
                  ContextPlanner contextPlanner,
+                 HistoryCompressor compressor,
                  TemplateOverhead templateOverhead,
                  AgentProperties properties) {
         this.llmClient = llmClient;
@@ -61,8 +65,9 @@ public class Agent {
         this.usageTracker = usageTracker;
         this.conversations = conversations;
         this.contextPlanner = contextPlanner;
+        this.compressor = compressor;
         this.templateOverhead = templateOverhead;
-        this.defaults = properties.defaults().toConfig();
+        this.defaults = properties.defaultConfig();
     }
 
     /**
@@ -78,11 +83,16 @@ public class Agent {
         AgentConfig effective = (config == null) ? defaults : config.withFallback(defaults);
 
         String prompt = inputPolicy.apply(userInput);
+
+        // Before pricing, not after: the whole point is that this turn is the one that gets
+        // cheaper, and the budget the caller is shown has to be the budget that was spent.
+        int compacted = compressIfDue(id, effective);
         List<Message> history = conversations.history(id);
+        Summary summary = conversations.summary(id);
 
         // Priced before a byte leaves the process: an oversized prompt is billed as a
         // rejection, so the cheapest place to find out it will not fit is here.
-        ContextPlanner.ContextPlan plan = contextPlanner.plan(effective, history, prompt);
+        ContextPlanner.ContextPlan plan = contextPlanner.plan(effective, summary, history, prompt);
         ContextBudget budget = plan.budget();
         if (budget.trimmed()) {
             log.info("Context trim: dropped {} oldest message(s) to fit {} of {} tokens",
@@ -102,8 +112,10 @@ public class Agent {
         // keeps the next turn's pre-flight estimate honest.
         templateOverhead.observe(effective.model(), budget.countedTokens(), usage.promptTokens());
 
-        log.info("Turn: prompt est {} / actual {} ({} history msgs), completion {}, window {}% used",
+        log.info("Turn: prompt est {} / actual {} ({} history msgs, summary {} tok replacing {}), "
+                        + "completion {}, window {}% used",
                 budget.promptTokens(), usage.promptTokens(), history.size(),
+                budget.summaryTokens(), budget.replacedTokens(),
                 usage.completionTokens(), budget.usedPercent());
 
         String answer = outputPolicy.apply(response.content());
@@ -119,12 +131,17 @@ public class Agent {
                                 latencyMillis, effective.model(), response.finishReason()))));
 
         return new AgentResult(answer, effective, usage, cumulative, budget,
-                response.finishReason(), latencyMillis, verdict, conversations.history(id));
+                response.finishReason(), latencyMillis, verdict, conversations.history(id), compacted);
     }
 
     /** Read-only view of the message stack, for rendering an existing dialogue. */
     public List<Message> transcript(String conversationId) {
         return conversations.history(conversationId);
+    }
+
+    /** The notes standing in for whatever has already been compressed out of the transcript. */
+    public Summary summary(String conversationId) {
+        return conversations.summary(conversationId);
     }
 
     /**
@@ -133,7 +150,40 @@ public class Agent {
      */
     public ContextBudget budget(String conversationId, AgentConfig config) {
         AgentConfig effective = (config == null) ? defaults : config.withFallback(defaults);
-        return contextPlanner.budget(effective, conversations.history(conversationId));
+        return contextPlanner.budget(effective, conversations.summary(conversationId),
+                conversations.history(conversationId));
+    }
+
+    /**
+     * Folds the backlog into the summary when there is enough of it to be worth a call.
+     * <p>
+     * A summarization failure must not take the user's turn down with it. The worst case of
+     * skipping it is a prompt that stays large for one more turn, which the overflow policy is
+     * already there to catch; the worst case of propagating it is an agent that stops answering
+     * because a background housekeeping call timed out.
+     *
+     * @return how many messages were folded, 0 if none
+     */
+    private int compressIfDue(String id, AgentConfig config) {
+        if (!config.compressHistoryEnabled()) {
+            return 0;
+        }
+        try {
+            return compressor.compact(conversations.summary(id), conversations.history(id))
+                    .map(compaction -> {
+                        conversations.compact(id, compaction.summary(), compaction.foldedMessages());
+                        log.info("Compressed {} message(s) worth {} tokens into summary rev {} — "
+                                        + "every later turn now replays notes instead",
+                                compaction.foldedMessages(), compaction.foldedTokens(),
+                                compaction.summary().revision());
+                        return compaction.foldedMessages();
+                    })
+                    .orElse(0);
+        } catch (AgentException e) {
+            log.warn("History compression failed ({}) — continuing with the full transcript.",
+                    e.getMessage());
+            return 0;
+        }
     }
 
     /** Starts a new dialogue, discarding the message stack. */

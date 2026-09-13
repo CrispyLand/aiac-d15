@@ -32,3 +32,13 @@ agent:
   memory:
     # Keep the demo dialogue off the real transcript file.
     file: ./data/conversations-demo.json
+
+  compression:
+    # Fire after two turns instead of five, so the fold is visible on camera without typing
+    # twenty messages first. Same trade-off, just reached sooner.
+    keep-recent-messages: 2
+    compress-every: 4
+    # Not lowered from application.yml's 800 on purpose: this ceiling is shared with gpt-oss's
+    # hidden reasoning tokens, and squeezing it to make the demo look tidier is exactly how you
+    # get a summary that stops mid-word.
+    max-summary-tokens: 800

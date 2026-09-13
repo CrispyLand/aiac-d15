@@ -82,6 +82,9 @@
                   text-align: right; }
         .mstats b { color: #40454d; }
         .body { white-space: pre-wrap; }
+        /* The compressed head of the dialogue — sits where the messages it replaced used to be. */
+        .turn.summary { background: #e9fbf3; border: 1px dashed #63d3a6; }
+        .turn.summary .who { color: #0b7a5b; }
         .bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
         .ghost { background: transparent; color: var(--muted); border: 1px solid var(--line);
                  padding: 6px 12px; font-size: 12px; font-weight: 600; }
@@ -96,6 +99,7 @@
         }
         .seg { height: 100%; }
         .seg.sys { background: #7048e8; }
+        .seg.sum { background: #0ca678; }
         .seg.hist { background: #3b5bdb; }
         .seg.input { background: #22b8cf; }
         .seg.tmpl { background: #f76707; }
@@ -172,6 +176,24 @@
                                     th:selected="${e == form.reasoningEffort}"></option>
                         </select>
                     </div>
+                    <!-- A select, not a checkbox: an unticked box posts nothing, and "nothing"
+                         already means "use the default" everywhere else on this form.
+                         Compared with == rather than negated with !: a post that omits the field
+                         still binds to null (a stale form, or any client that doesn't send it),
+                         and SpEL's ! cannot unbox null — the whole page 500s into a blank screen
+                         over one dropdown. == is null-safe and simply selects neither option. -->
+                    <div class="field">
+                        <label for="compressHistory">History compression
+                            <span class="hint">— flip it to compare the same chat both ways</span></label>
+                        <select id="compressHistory" name="compressHistory">
+                            <option value="true" th:selected="${form.compressHistory == true}">
+                                on — summarize older turns
+                            </option>
+                            <option value="false" th:selected="${form.compressHistory == false}">
+                                off — replay the full transcript
+                            </option>
+                        </select>
+                    </div>
                 </div>
 
                 <div class="field">
@@ -210,6 +232,22 @@
                 No messages yet — the agent will remember every turn you send.
             </div>
 
+            <!-- Stands exactly where the messages it replaced used to be: this is the whole
+                 conversation, it is just that the head of it is no longer made of messages. -->
+            <div class="turn summary" th:if="${summary != null and summary.present}">
+                <div class="turnhead">
+                    <span class="who">summary · rev <span th:text="${summary.revision}">0</span></span>
+                    <span class="mstats">
+                        replaces <b th:text="${summary.coveredMessages}">0</b> messages
+                        · <b th:text="${#numbers.formatInteger(summary.replacedTokens, 1, 'COMMA')}">0</b>
+                        tok of transcript
+                        · cost <b th:text="${#numbers.formatInteger(summary.buildTokens, 1, 'COMMA')}">0</b>
+                        tok to write
+                    </span>
+                </div>
+                <div class="body" th:text="${summary.text}"></div>
+            </div>
+
             <div th:each="m : ${transcript}" class="turn"
                  th:classappend="${m.user} ? 'user' : 'assistant'">
                 <div class="turnhead">
@@ -244,6 +282,7 @@
 
             <div class="track">
                 <span class="seg sys" th:style="'width:' + ${budget.systemPercent} + '%'"></span>
+                <span class="seg sum" th:style="'width:' + ${budget.summaryPercent} + '%'"></span>
                 <span class="seg hist" th:style="'width:' + ${budget.historyPercent} + '%'"></span>
                 <span class="seg input" th:style="'width:' + ${budget.inputPercent} + '%'"></span>
                 <span class="seg tmpl" th:style="'width:' + ${budget.overheadPercent} + '%'"></span>
@@ -254,6 +293,8 @@
             <div class="key">
                 <span><i style="background:#7048e8"></i>system prompt
                       <b th:text="${#numbers.formatInteger(budget.systemTokens, 1, 'COMMA')}">0</b></span>
+                <span th:if="${budget.compressed}"><i style="background:#0ca678"></i>summary
+                      <b th:text="${#numbers.formatInteger(budget.summaryTokens, 1, 'COMMA')}">0</b></span>
                 <span><i style="background:#3b5bdb"></i>history
                       <b th:text="${#numbers.formatInteger(budget.historyTokens, 1, 'COMMA')}">0</b></span>
                 <span th:if="${budget.inputTokens > 0}"><i style="background:#22b8cf"></i>new message
@@ -275,6 +316,21 @@
             <div class="note warn" th:if="${budget.warning}">
                 Past the warning line. History is re-sent in full on every call, so the cost of
                 each turn keeps climbing even if your messages stay short.
+            </div>
+            <!-- The before/after, on the only prompt that matters: the next one. -->
+            <div class="note info" th:if="${budget.compressed}">
+                Compressed. This prompt carries a
+                <b th:text="${#numbers.formatInteger(budget.summaryTokens, 1, 'COMMA')}">0</b>-token
+                summary in place of
+                <b th:text="${#numbers.formatInteger(budget.replacedTokens, 1, 'COMMA')}">0</b>
+                tokens of messages —
+                <b th:text="${#numbers.formatInteger(budget.uncompressedPromptTokens, 1, 'COMMA')}">0</b>
+                tokens uncompressed vs
+                <b th:text="${#numbers.formatInteger(budget.promptTokens, 1, 'COMMA')}">0</b> now,
+                a saving of
+                <b th:text="${#numbers.formatInteger(budget.savedTokens, 1, 'COMMA')} + ' (' +
+                            ${budget.savedPercent} + '%)'">0</b>
+                on this call and on every call after it.
             </div>
             <div class="note info" th:if="${budget.trimmed}">
                 Trim policy dropped the
@@ -331,6 +387,13 @@
             pre-flight estimate <b th:text="${#numbers.formatInteger(result.budget.promptTokens, 1, 'COMMA')}">0</b>
             · Groq actual <b th:text="${#numbers.formatInteger(result.usage.promptTokens, 1, 'COMMA')}">0</b>
             · drift <b th:text="${#numbers.formatDecimal(result.promptTokenDriftPercent(), 1, 1)} + '%'">0%</b>
+        </div>
+
+        <div class="note info" th:if="${result.compacted()}">
+            Compression fired on this turn:
+            <b th:text="${result.compactedMessages}">0</b> older message(s) were folded into the
+            summary <em>before</em> the request was built, so the prompt above is already the
+            compressed one. Watch the growth table below — the curve steps down here.
         </div>
 
         <div class="note over" th:if="${result.truncated()}">

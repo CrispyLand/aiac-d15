@@ -13,6 +13,8 @@ import java.util.List;
  *
  * @param budget the pre-flight estimate, kept alongside {@code usage} so the prediction can
  *               be held against the provider's ground truth on every single turn
+ * @param compactedMessages how many older messages this turn folded into the summary before
+ *                          it ran; 0 on every turn that did not trigger a compression
  */
 public record AgentResult(
         String answer,
@@ -23,7 +25,8 @@ public record AgentResult(
         String finishReason,
         long latencyMillis,
         Verdict verdict,
-        List<Message> transcript) {
+        List<Message> transcript,
+        int compactedMessages) {
 
     public AgentResult {
         transcript = (transcript == null) ? List.of() : List.copyOf(transcript);
@@ -45,5 +48,9 @@ public record AgentResult(
      */
     public boolean truncated() {
         return "length".equals(finishReason);
+    }
+
+    public boolean compacted() {
+        return compactedMessages > 0;
     }
 }

@@ -16,7 +16,8 @@ public record ChatForm(
         Integer maxCompletionTokens,
         String reasoningEffort,
         String stopSequences,
-        String responseSchema) {
+        String responseSchema,
+        Boolean compressHistory) {
 
     public AgentConfig toAgentConfig() {
         return AgentConfig.builder()
@@ -27,6 +28,7 @@ public record ChatForm(
                 .reasoningEffort(reasoningEffort)
                 .stopSequences(parseStopSequences())
                 .responseSchema(responseSchema)
+                .compressHistory(compressHistory)
                 .build();
     }
 
@@ -40,7 +42,8 @@ public record ChatForm(
                 config.maxCompletionTokens(),
                 config.reasoningEffort(),
                 String.join(", ", config.stopSequencesOrEmpty()),
-                config.responseSchema());
+                config.responseSchema(),
+                config.compressHistoryEnabled());
     }
 
     private List<String> parseStopSequences() {

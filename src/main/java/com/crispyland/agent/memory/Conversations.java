@@ -27,4 +27,14 @@ final class Conversations {
         int excess = (maxMessages > 0) ? updated.size() - maxMessages : 0;
         return excess > 0 ? new ArrayList<>(updated.subList(excess, updated.size())) : updated;
     }
+
+    /** Removes the {@code count} oldest messages, once a summary has taken their place. */
+    static List<Message> drop(List<Message> existing, int count) {
+        if (existing == null || count <= 0) {
+            return (existing == null) ? new ArrayList<>() : existing;
+        }
+        return count >= existing.size()
+                ? new ArrayList<>()
+                : new ArrayList<>(existing.subList(count, existing.size()));
+    }
 }

@@ -31,6 +31,7 @@ public class JsonFileConversationStore implements ConversationStore {
     private static final Logger log = LoggerFactory.getLogger(JsonFileConversationStore.class);
 
     private final Map<String, List<Message>> conversations = new ConcurrentHashMap<>();
+    private final Map<String, Summary> summaries = new ConcurrentHashMap<>();
     private final ObjectMapper mapper;
     private final Path file;
     private final int maxMessages;
@@ -62,8 +63,22 @@ public class JsonFileConversationStore implements ConversationStore {
     }
 
     @Override
+    public Summary summary(String conversationId) {
+        return summaries.getOrDefault(conversationId, Summary.EMPTY);
+    }
+
+    @Override
+    public void compact(String conversationId, Summary summary, int foldedMessages) {
+        conversations.computeIfPresent(conversationId,
+                (key, existing) -> Conversations.drop(existing, foldedMessages));
+        summaries.put(conversationId, summary);
+        flush();
+    }
+
+    @Override
     public void clear(String conversationId) {
         conversations.remove(conversationId);
+        summaries.remove(conversationId);
         flush();
     }
 
@@ -80,7 +95,14 @@ public class JsonFileConversationStore implements ConversationStore {
         try {
             JsonNode root = mapper.readTree(Files.readString(file));
             JsonNode stored = root.path("conversations");
-            stored.propertyNames().forEach(id -> conversations.put(id, readMessages(stored.path(id))));
+            stored.propertyNames().forEach(id -> {
+                JsonNode entry = stored.path(id);
+                conversations.put(id, readMessages(entry.path("messages")));
+                JsonNode summary = entry.path("summary");
+                if (summary.isObject()) {
+                    summaries.put(id, readSummary(summary));
+                }
+            });
             log.info("Restored {} conversation(s) from {}", conversations.size(), file.toAbsolutePath());
         } catch (IOException | JacksonException e) {
             log.warn("Could not read conversation history from {} ({}) — starting with an empty dialogue.",
@@ -115,7 +137,12 @@ public class JsonFileConversationStore implements ConversationStore {
         ObjectNode root = mapper.createObjectNode();
         ObjectNode stored = root.putObject("conversations");
         conversations.forEach((id, messages) -> {
-            ArrayNode array = stored.putArray(id);
+            ObjectNode entry = stored.putObject(id);
+            Summary summary = summaries.get(id);
+            if (summary != null && summary.isPresent()) {
+                writeSummary(entry.putObject("summary"), summary);
+            }
+            ArrayNode array = entry.putArray("messages");
             for (Message message : messages) {
                 ObjectNode node = array.addObject();
                 node.put("role", message.role());
@@ -126,6 +153,23 @@ public class JsonFileConversationStore implements ConversationStore {
             }
         });
         return root;
+    }
+
+    private static void writeSummary(ObjectNode node, Summary summary) {
+        node.put("text", summary.text());
+        node.put("revision", summary.revision());
+        node.put("coveredMessages", summary.coveredMessages());
+        node.put("replacedTokens", summary.replacedTokens());
+        node.put("buildTokens", summary.buildTokens());
+    }
+
+    private static Summary readSummary(JsonNode node) {
+        return new Summary(
+                text(node.path("text")),
+                (int) number(node.path("revision")),
+                (int) number(node.path("coveredMessages")),
+                number(node.path("replacedTokens")),
+                number(node.path("buildTokens")));
     }
 
     private static void writeStats(ObjectNode node, MessageStats stats) {

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.crispyland.agent.memory.Message;
+import com.crispyland.agent.memory.Summary;
 import com.crispyland.agent.usage.BpeTokenCounter;
 import com.crispyland.agent.usage.ContextBudget;
 import com.crispyland.agent.usage.OverflowPolicy;
@@ -29,10 +30,10 @@ class ContextPlannerTest {
     @Test
     void theSegmentsAddUpToTheEstimatedPrompt() {
         ContextBudget budget = planner(1000, OverflowPolicy.FAIL)
-                .plan(CONFIG, history(2), "hello").budget();
+                .plan(CONFIG, Summary.EMPTY, history(2), "hello").budget();
 
-        assertThat(budget.promptTokens()).isEqualTo(budget.systemTokens() + budget.historyTokens()
-                + budget.inputTokens() + budget.overheadTokens());
+        assertThat(budget.promptTokens()).isEqualTo(budget.systemTokens() + budget.summaryTokens()
+                + budget.historyTokens() + budget.inputTokens() + budget.overheadTokens());
         assertThat(budget.projectedTokens()).isEqualTo(budget.promptTokens() + 100);
         assertThat(budget.remainingTokens()).isEqualTo(1000 - budget.projectedTokens());
     }
@@ -43,7 +44,7 @@ class ContextPlannerTest {
         ContextPlanner planner = new ContextPlanner(new BpeTokenCounter(), overhead, Map.of(),
                 1000, OverflowPolicy.OFF, 0.8);
 
-        ContextBudget first = planner.plan(CONFIG, List.of(), "hello").budget();
+        ContextBudget first = planner.plan(CONFIG, Summary.EMPTY, List.of(), "hello").budget();
         assertThat(first.calibrated()).isFalse();
         assertThat(first.overheadTokens()).isZero();
 
@@ -51,7 +52,7 @@ class ContextPlannerTest {
         // harmony template, and it is the same on every subsequent call.
         overhead.observe("openai/gpt-oss-20b", first.countedTokens(), first.countedTokens() + 60);
 
-        ContextBudget second = planner.plan(CONFIG, List.of(), "hello").budget();
+        ContextBudget second = planner.plan(CONFIG, Summary.EMPTY, List.of(), "hello").budget();
         assertThat(second.calibrated()).isTrue();
         assertThat(second.overheadTokens()).isEqualTo(60);
         assertThat(second.promptTokens()).isEqualTo(first.promptTokens() + 60);
@@ -84,7 +85,7 @@ class ContextPlannerTest {
         // this is the arithmetic a message-counted window cannot see.
         ContextBudget budget = planner(1000, OverflowPolicy.OFF)
                 .plan(AgentConfig.builder().model("m").maxCompletionTokens(995).build(),
-                        List.of(), "hello").budget();
+                        Summary.EMPTY, List.of(), "hello").budget();
 
         assertThat(budget.promptTokens()).isLessThan(1000);
         assertThat(budget.overflowing()).isTrue();
@@ -95,8 +96,8 @@ class ContextPlannerTest {
         ContextPlanner planner = new ContextPlanner(new BpeTokenCounter(), new TemplateOverhead(),
                 Map.of("openai/gpt-oss-20b", 8192), 131_072, OverflowPolicy.OFF, 0.8);
 
-        assertThat(planner.budget(CONFIG, List.of()).contextWindow()).isEqualTo(8192);
-        assertThat(planner.budget(AgentConfig.builder().model("unlisted").build(), List.of())
+        assertThat(planner.budget(CONFIG, Summary.EMPTY, List.of()).contextWindow()).isEqualTo(8192);
+        assertThat(planner.budget(AgentConfig.builder().model("unlisted").build(), Summary.EMPTY, List.of())
                 .contextWindow()).isEqualTo(131_072);
     }
 
@@ -105,7 +106,7 @@ class ContextPlannerTest {
         ContextPlanner planner = new ContextPlanner(new BpeTokenCounter(), new TemplateOverhead(),
                 Map.of(), 130, OverflowPolicy.OFF, 0.8);
 
-        ContextBudget budget = planner.plan(CONFIG, List.of(), "hello").budget();
+        ContextBudget budget = planner.plan(CONFIG, Summary.EMPTY, List.of(), "hello").budget();
 
         assertThat(budget.overflowing()).isFalse();
         assertThat(budget.warning()).isTrue();
@@ -114,7 +115,7 @@ class ContextPlannerTest {
 
     @Test
     void failRefusesTheCallAndExplainsTheArithmetic() {
-        assertThatThrownBy(() -> planner(120, OverflowPolicy.FAIL).plan(CONFIG, history(10), "hello"))
+        assertThatThrownBy(() -> planner(120, OverflowPolicy.FAIL).plan(CONFIG, Summary.EMPTY, history(10), "hello"))
                 .isInstanceOf(ContextOverflowException.class)
                 .hasMessageContaining("over by")
                 .hasMessageContaining("system")
@@ -123,7 +124,7 @@ class ContextPlannerTest {
 
     @Test
     void offMeasuresTheOverflowButStillBuildsTheRequest() {
-        ContextPlanner.ContextPlan plan = planner(120, OverflowPolicy.OFF).plan(CONFIG, history(10), "hello");
+        ContextPlanner.ContextPlan plan = planner(120, OverflowPolicy.OFF).plan(CONFIG, Summary.EMPTY, history(10), "hello");
 
         assertThat(plan.budget().overflowing()).isTrue();
         assertThat(plan.budget().droppedMessages()).isZero();
@@ -132,7 +133,7 @@ class ContextPlannerTest {
 
     @Test
     void trimDropsOldestFirstAndKeepsTheWindowOpeningOnAUserMessage() {
-        ContextPlanner.ContextPlan plan = planner(150, OverflowPolicy.TRIM).plan(CONFIG, history(10), "hello");
+        ContextPlanner.ContextPlan plan = planner(150, OverflowPolicy.TRIM).plan(CONFIG, Summary.EMPTY, history(10), "hello");
 
         assertThat(plan.budget().trimmed()).isTrue();
         assertThat(plan.budget().overflowing()).isFalse();
@@ -145,18 +146,49 @@ class ContextPlannerTest {
     @Test
     void trimStillFailsWhenTheFixedPartsAloneDoNotFit() {
         // Nothing left to drop: system prompt + new message + reserved reply already overflow.
-        assertThatThrownBy(() -> planner(100, OverflowPolicy.TRIM).plan(CONFIG, history(10), "hello"))
+        assertThatThrownBy(() -> planner(100, OverflowPolicy.TRIM).plan(CONFIG, Summary.EMPTY, history(10), "hello"))
                 .isInstanceOf(ContextOverflowException.class);
     }
 
     @Test
     void anEmptyDialogueStillCostsTheSystemPromptAndTheReservedReply() {
-        ContextBudget budget = planner(1000, OverflowPolicy.FAIL).budget(CONFIG, List.of());
+        ContextBudget budget = planner(1000, OverflowPolicy.FAIL).budget(CONFIG, Summary.EMPTY, List.of());
 
         assertThat(budget.historyTokens()).isZero();
         assertThat(budget.inputTokens()).isZero();
         assertThat(budget.systemTokens()).isPositive();
         assertThat(budget.reservedCompletionTokens()).isEqualTo(100);
+    }
+
+    @Test
+    void theSummaryIsSentAsItsOwnSegmentAheadOfTheRetainedTurns() {
+        Summary summary = Summary.EMPTY.rewrittenAs("user is called Nur", 8, 400, 60);
+
+        ContextPlanner.ContextPlan plan = planner(1000, OverflowPolicy.FAIL)
+                .plan(CONFIG, summary, history(2), "hello");
+
+        // System prompt first, then what was forgotten, then what is still remembered verbatim.
+        assertThat(plan.messages()).extracting(Message::role)
+                .containsExactly("system", "system", "user", "assistant", "user");
+        assertThat(plan.messages().get(1).content()).contains("user is called Nur");
+        assertThat(plan.budget().summaryTokens()).isPositive();
+        // The saving is measured against what those 400 tokens of messages used to cost.
+        assertThat(plan.budget().replacedTokens()).isEqualTo(400);
+        assertThat(plan.budget().savedTokens())
+                .isEqualTo(400 - plan.budget().summaryTokens());
+        assertThat(plan.budget().uncompressedPromptTokens())
+                .isEqualTo(plan.budget().promptTokens() + plan.budget().savedTokens());
+    }
+
+    @Test
+    void withoutASummaryNothingAboutTheBudgetChanges() {
+        ContextBudget budget = planner(1000, OverflowPolicy.FAIL)
+                .plan(CONFIG, Summary.EMPTY, history(2), "hello").budget();
+
+        assertThat(budget.compressed()).isFalse();
+        assertThat(budget.summaryTokens()).isZero();
+        assertThat(budget.savedTokens()).isZero();
+        assertThat(budget.uncompressedPromptTokens()).isEqualTo(budget.promptTokens());
     }
 
     /** {@code count} messages alternating user/assistant, as a real transcript would be. */

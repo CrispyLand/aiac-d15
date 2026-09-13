@@ -51,8 +51,10 @@ agent:
     max-length: 0                   # 0 = unlimited
 
   memory:
-    # Rolling window over the dialogue, counted in messages (1 turn = 2 messages).
-    # Older turns drop off so the prompt cannot grow without bound. 0 = keep everything.
+    # Backstop, counted in messages (1 turn = 2 messages). With compression on, the stack never
+    # gets this far: it is folded at keep-recent + compress-every and then shrinks back, so this
+    # only bites if compression is switched off. Keep it above that sum or turns will be
+    # destroyed before the summarizer ever reads them. 0 = keep everything.
     # The system prompt is not stored — it is re-applied fresh on every turn.
     max-messages: 20
 
@@ -82,6 +84,49 @@ agent:
 
     # Fraction of the window at which the page starts warning.
     warn-at: 0.80
+
+  # The third answer to a growing prompt. max-messages and overflow-policy both shrink the
+  # context by forgetting; this one rewrites the old turns into notes and sends those instead,
+  # so the cost stops growing without the dialogue losing what happened.
+  compression:
+    # Default for new turns — the page can flip it per turn, which is how you compare the same
+    # conversation with and without it.
+    enabled: true
+
+    # The tail that is always sent verbatim. Recency is where pronouns, corrections and
+    # "no, the other one" live, and a summary is a poor substitute for the last few turns.
+    keep-recent-messages: 6
+
+    # Minimum backlog beyond that tail before summarizing is worth the request it costs.
+    # 10 messages = 5 turns, so compression fires roughly every fifth turn.
+    #
+    # This number is an economic choice, not a cosmetic one. A fold costs a whole extra call —
+    # measured at ~500 tokens, most of it the fixed instruction prompt — and buys back ~125
+    # tokens on every turn that follows. Folding 10 messages at a time, that paid for itself
+    # five turns later; folding 4 at a time it did not pay for itself at all within a short
+    # conversation, because the same fixed cost was amortized over a quarter as much transcript.
+    # Lower it to see compression sooner on camera, not to save more.
+    compress-every: 10
+
+    # Who writes the notes. Blank = whatever agent.defaults.model is. A small model is usually
+    # the right call: summarizing is much easier than answering, and this runs on every 5th turn.
+    model: openai/gpt-oss-20b
+
+    # Ceiling on the notes, and therefore on this segment of every future prompt. This is the
+    # number that makes the cost curve flat instead of quadratic.
+    #
+    # On a reasoning model this budget is NOT all notes: gpt-oss's hidden reasoning tokens are
+    # billed against the same max_completion_tokens, and they are spent first. At 200 the model
+    # burned the lot thinking and emitted "- Nur," — a summary truncated mid-name, which is worse
+    # than none, because the messages behind it would have been folded away. The compressor now
+    # refuses a finish_reason=length summary, so the failure is a skipped compaction and a WARN
+    # rather than silent data loss — but the budget still has to cover both halves.
+    max-summary-tokens: 800
+
+    # "" omits the parameter (required for qwen/compound, which reject it). On gpt-oss, `low`
+    # is what keeps most of the ceiling above available for the notes themselves: taking
+    # minutes is not a reasoning-heavy task, and the output is bullet points, not an argument.
+    reasoning-effort: low
 
 logging:
   level:

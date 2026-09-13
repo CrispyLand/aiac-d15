@@ -22,7 +22,19 @@ public record AgentProperties(
         Limit inputPolicy,
         Limit outputPolicy,
         Memory memory,
-        Context context) {
+        Context context,
+        Compression compression) {
+
+    /**
+     * The starting point for every turn: the declared defaults, plus whether compression is on.
+     * Compression is configured with its own mechanism under {@code agent.compression} but is
+     * overridable per turn, so it has to arrive in the same merge as everything else.
+     */
+    public AgentConfig defaultConfig() {
+        return defaults.toConfig().toBuilder()
+                .compressHistory(compression != null && compression.enabled())
+                .build();
+    }
 
     /** Per-request parameter defaults used whenever the caller does not supply a value. */
     public record Defaults(
@@ -75,5 +87,28 @@ public record AgentProperties(
                           int defaultWindow,
                           OverflowPolicy overflowPolicy,
                           double warnAt) {
+    }
+
+    /**
+     * History compression: the third answer to a growing prompt, after the message window and
+     * the token window — rewrite the old turns instead of dropping them.
+     *
+     * @param enabled            default for new turns; the page may override it per request
+     * @param keepRecentMessages tail always sent verbatim, never summarized
+     * @param compressEvery      minimum backlog beyond the tail before a summarization is worth
+     *                           the call it costs
+     * @param model              which model writes the notes; a cheap one is usually right
+     * @param maxSummaryTokens   ceiling on the notes, and therefore on this part of every prompt.
+     *                           On a reasoning model the hidden reasoning tokens are billed
+     *                           against this same ceiling, so it has to cover both
+     * @param reasoningEffort    {@code ""} omits the parameter; on gpt-oss, {@code low} leaves
+     *                           most of {@code maxSummaryTokens} for the notes themselves
+     */
+    public record Compression(boolean enabled,
+                              int keepRecentMessages,
+                              int compressEvery,
+                              String model,
+                              int maxSummaryTokens,
+                              String reasoningEffort) {
     }
 }

@@ -10,6 +10,11 @@ import java.util.Objects;
  * {@link #withFallback(AgentConfig)} merge fills those gaps from the configured defaults.
  * Adding a new tunable means: add a component here, one line in the builder, one line in
  * {@code withFallback}, one line in the yml defaults.
+ * <p>
+ * Not all of it is sent to the provider: {@code maxCompletionTokens} doubles as the slice of
+ * the window reserved for the reply, and {@code compressHistory} never leaves the process at
+ * all — it decides how the context is assembled, which is what makes it worth having on the
+ * page as a switch you can flip between two otherwise identical turns.
  */
 public record AgentConfig(
         String model,
@@ -18,7 +23,8 @@ public record AgentConfig(
         Integer maxCompletionTokens,
         String reasoningEffort,
         List<String> stopSequences,
-        String responseSchema) {
+        String responseSchema,
+        Boolean compressHistory) {
 
     public AgentConfig {
         stopSequences = (stopSequences == null) ? null : List.copyOf(stopSequences);
@@ -36,7 +42,8 @@ public record AgentConfig(
                 .maxCompletionTokens(maxCompletionTokens)
                 .reasoningEffort(reasoningEffort)
                 .stopSequences(stopSequences)
-                .responseSchema(responseSchema);
+                .responseSchema(responseSchema)
+                .compressHistory(compressHistory);
     }
 
     /**
@@ -52,7 +59,13 @@ public record AgentConfig(
                 maxCompletionTokens != null ? maxCompletionTokens : defaults.maxCompletionTokens(),
                 text(reasoningEffort, defaults.reasoningEffort()),
                 stopSequences != null ? stopSequences : defaults.stopSequences(),
-                text(responseSchema, defaults.responseSchema()));
+                text(responseSchema, defaults.responseSchema()),
+                compressHistory != null ? compressHistory : defaults.compressHistory());
+    }
+
+    /** Compression is opt-out rather than opt-in once the defaults have been merged in. */
+    public boolean compressHistoryEnabled() {
+        return Boolean.TRUE.equals(compressHistory);
     }
 
     public List<String> stopSequencesOrEmpty() {
@@ -79,6 +92,7 @@ public record AgentConfig(
         private String reasoningEffort;
         private List<String> stopSequences;
         private String responseSchema;
+        private Boolean compressHistory;
 
         public Builder model(String model) {
             this.model = model;
@@ -115,9 +129,14 @@ public record AgentConfig(
             return this;
         }
 
+        public Builder compressHistory(Boolean compressHistory) {
+            this.compressHistory = compressHistory;
+            return this;
+        }
+
         public AgentConfig build() {
             return new AgentConfig(model, systemPrompt, temperature, maxCompletionTokens,
-                    reasoningEffort, stopSequences, responseSchema);
+                    reasoningEffort, stopSequences, responseSchema, compressHistory);
         }
     }
 }

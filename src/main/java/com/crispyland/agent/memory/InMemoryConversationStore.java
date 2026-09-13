@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class InMemoryConversationStore implements ConversationStore {
 
     private final Map<String, List<Message>> conversations = new ConcurrentHashMap<>();
+    private final Map<String, Summary> summaries = new ConcurrentHashMap<>();
     private final int maxMessages;
 
     /** @param maxMessages rolling window size; {@code <= 0} keeps everything */
@@ -33,7 +34,20 @@ public class InMemoryConversationStore implements ConversationStore {
     }
 
     @Override
+    public Summary summary(String conversationId) {
+        return summaries.getOrDefault(conversationId, Summary.EMPTY);
+    }
+
+    @Override
+    public void compact(String conversationId, Summary summary, int foldedMessages) {
+        conversations.computeIfPresent(conversationId,
+                (key, existing) -> Conversations.drop(existing, foldedMessages));
+        summaries.put(conversationId, summary);
+    }
+
+    @Override
     public void clear(String conversationId) {
         conversations.remove(conversationId);
+        summaries.remove(conversationId);
     }
 }

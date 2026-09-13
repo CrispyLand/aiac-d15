@@ -39,9 +39,9 @@ public class ChatController {
     public String chatPage(Model model, HttpServletRequest request, HttpServletResponse response) {
         // Resolving here also mints the cookie for a first-time visitor, before they send anything.
         String conversationId = conversationIds.resolve(request, response);
-        AgentConfig defaults = properties.defaults().toConfig();
+        AgentConfig defaults = properties.defaultConfig();
         model.addAttribute("form", ChatForm.of("", defaults));
-        addTranscript(model, agent.transcript(conversationId));
+        addTranscript(model, conversationId, agent.transcript(conversationId));
         model.addAttribute("budget", agent.budget(conversationId, defaults));
         addOptions(model);
         return "chat";
@@ -55,15 +55,15 @@ public class ChatController {
 
         if (binding.hasErrors()) {
             model.addAttribute("error", "Some parameters could not be read — check the numeric fields.");
-            addTranscript(model, agent.transcript(conversationId));
-            model.addAttribute("budget", agent.budget(conversationId, properties.defaults().toConfig()));
+            addTranscript(model, conversationId, agent.transcript(conversationId));
+            model.addAttribute("budget", agent.budget(conversationId, properties.defaultConfig()));
             return "chat";
         }
 
         try {
             AgentResult result = agent.handle(conversationId, form.userInput(), form.toAgentConfig());
             model.addAttribute("result", result);
-            addTranscript(model, result.transcript());
+            addTranscript(model, conversationId, result.transcript());
             model.addAttribute("budget", agent.budget(conversationId, result.effectiveConfig()));
             // Keep the settings the agent actually used, but clear the box for the next turn.
             model.addAttribute("form", ChatForm.of("", result.effectiveConfig()));
@@ -71,10 +71,10 @@ public class ChatController {
             // Show the budget that caused the refusal, not the one the dialogue merely sits at.
             model.addAttribute("error", e.getMessage());
             model.addAttribute("budget", e.budget());
-            addTranscript(model, agent.transcript(conversationId));
+            addTranscript(model, conversationId, agent.transcript(conversationId));
         } catch (AgentException e) {
             model.addAttribute("error", e.getMessage());
-            addTranscript(model, agent.transcript(conversationId));
+            addTranscript(model, conversationId, agent.transcript(conversationId));
             model.addAttribute("budget", agent.budget(conversationId, form.toAgentConfig()));
         }
         return "chat";
@@ -88,9 +88,12 @@ public class ChatController {
     }
 
     /** The turn-by-turn cost series is only ever a view over the transcript — never stored twice. */
-    private void addTranscript(Model model, List<Message> transcript) {
+    private void addTranscript(Model model, String conversationId, List<Message> transcript) {
         model.addAttribute("transcript", transcript);
         model.addAttribute("turns", TurnCost.series(transcript));
+        // The head of the dialogue that no longer exists as messages — rendered above them so
+        // the page shows the whole conversation, compressed part included.
+        model.addAttribute("summary", agent.summary(conversationId));
     }
 
     /** Dropdown contents come from application.yml, not from the template. */

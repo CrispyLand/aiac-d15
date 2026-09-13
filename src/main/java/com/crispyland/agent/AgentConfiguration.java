@@ -5,6 +5,7 @@ import com.crispyland.agent.judge.NoOpJudge;
 import com.crispyland.agent.llm.GroqLlmClient;
 import com.crispyland.agent.llm.LlmClient;
 import com.crispyland.agent.memory.ConversationStore;
+import com.crispyland.agent.memory.HistoryCompressor;
 import com.crispyland.agent.memory.InMemoryConversationStore;
 import com.crispyland.agent.memory.JsonFileConversationStore;
 import com.crispyland.agent.policy.DefaultInputPolicy;
@@ -85,6 +86,23 @@ public class AgentConfiguration {
         AgentProperties.Context context = properties.context();
         return new ContextPlanner(tokenCounter, templateOverhead, context.windows(),
                 context.defaultWindow(), context.overflowPolicy(), context.warnAt());
+    }
+
+    /**
+     * Summarization is an ordinary call through the same client, so it is billed, logged and
+     * rate-limited exactly like a user turn — because it is one.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public HistoryCompressor historyCompressor(LlmClient llmClient, TokenCounter tokenCounter,
+                                               AgentProperties properties) {
+        AgentProperties.Compression compression = properties.compression();
+        String model = (compression.model() == null || compression.model().isBlank())
+                ? properties.defaults().model()
+                : compression.model();
+        return new HistoryCompressor(llmClient, tokenCounter, model, compression.keepRecentMessages(),
+                compression.compressEvery(), compression.maxSummaryTokens(),
+                compression.reasoningEffort());
     }
 
     /**

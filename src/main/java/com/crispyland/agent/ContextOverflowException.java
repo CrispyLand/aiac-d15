@@ -22,8 +22,8 @@ public class ContextOverflowException extends AgentException {
     private static String describe(ContextBudget budget) {
         return ("Context window exceeded for %s: %,d prompt + %,d reserved for the reply = %,d, "
                 + "but the window holds %,d (over by %,d). "
-                + "The prompt breaks down as %,d system + %,d history + %,d new message "
-                + "+ %,d chat template — "
+                + "The prompt breaks down as %,d system + %,d summary + %,d history "
+                + "+ %,d new message + %,d chat template — "
                 + "start a new chat, shorten the system prompt, or lower max completion tokens.")
                 .formatted(budget.model(),
                         budget.promptTokens(),
@@ -32,6 +32,7 @@ public class ContextOverflowException extends AgentException {
                         budget.contextWindow(),
                         -budget.remainingTokens(),
                         budget.systemTokens(),
+                        budget.summaryTokens(),
                         budget.historyTokens(),
                         budget.inputTokens(),
                         budget.overheadTokens());

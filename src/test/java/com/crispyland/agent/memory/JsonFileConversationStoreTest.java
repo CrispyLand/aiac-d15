@@ -77,6 +77,28 @@ class JsonFileConversationStoreTest {
     }
 
     @Test
+    void aCompactedConversationRestoresWithItsSummaryInsteadOfItsMessages() {
+        JsonFileConversationStore first = store(20);
+        first.append("c1", List.of(Message.user("my name is Nur"), Message.assistant("Hello, Nur."),
+                Message.user("still here"), Message.assistant("Yes.")));
+        first.compact("c1", Summary.EMPTY.rewrittenAs("user is called Nur", 2, 40, 60), 2);
+
+        JsonFileConversationStore restarted = store(20);
+        // The folded messages are gone from disk; the notes that replaced them are not.
+        assertThat(restarted.history("c1")).extracting(Message::content)
+                .containsExactly("still here", "Yes.");
+        assertThat(restarted.summary("c1"))
+                .isEqualTo(new Summary("user is called Nur", 1, 2, 40, 60));
+    }
+
+    @Test
+    void anUncompressedConversationRestoresWithNoSummary() {
+        store(20).append("c1", List.of(Message.user("hello")));
+
+        assertThat(store(20).summary("c1")).isEqualTo(Summary.EMPTY);
+    }
+
+    @Test
     void clearingRemovesTheConversationFromDisk() {
         JsonFileConversationStore first = store(20);
         first.append("c1", List.of(Message.user("hello")));

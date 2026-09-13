@@ -1,6 +1,7 @@
 package com.crispyland.agent;
 
 import com.crispyland.agent.memory.Message;
+import com.crispyland.agent.memory.Summary;
 import com.crispyland.agent.usage.BpeTokenCounter;
 import com.crispyland.agent.usage.ContextBudget;
 import com.crispyland.agent.usage.OverflowPolicy;
@@ -18,6 +19,11 @@ import java.util.Map;
  * <em>messages</em>, which is not the unit the model charges in: twenty one-word turns and
  * twenty pasted stack traces are the same window and wildly different prompts. This is the
  * second window, measured in the unit that can actually overflow.
+ * <p>
+ * Both windows are subtractive — they answer a prompt that is too long by sending less of it.
+ * The summary is the third option: the compressed head of the dialogue arrives as one bounded
+ * message standing in for the turns that are no longer sent, so the prompt shrinks without the
+ * conversation losing what happened in them.
  */
 public class ContextPlanner {
 
@@ -51,19 +57,23 @@ public class ContextPlanner {
     }
 
     /**
-     * Prices the system prompt, the replayed history and the new message against the model's
-     * window, applies the overflow policy, and returns the message array to send.
+     * Prices the system prompt, the summary, the replayed history and the new message against
+     * the model's window, applies the overflow policy, and returns the message array to send.
      *
+     * @param summary stands in for whatever has been compressed out of {@code history}; it is
+     *                sent instead of those messages, not in addition to them
      * @throws ContextOverflowException under {@link OverflowPolicy#FAIL}, or under
      *         {@link OverflowPolicy#TRIM} when even an empty history does not fit
      */
-    public ContextPlan plan(AgentConfig config, List<Message> history, String input) {
+    public ContextPlan plan(AgentConfig config, Summary summary, List<Message> history, String input) {
         // The system prompt is re-applied fresh each turn rather than stored, so editing it
         // on the page takes effect immediately — and is re-paid for on every single call.
         Message system = hasSystemPrompt(config) ? Message.system(config.systemPrompt()) : null;
+        Message recall = recallMessage(summary);
         Message userMessage = Message.user(input);
 
         long systemTokens = counter.count(system);
+        long summaryTokens = counter.count(recall);
         // The once-per-request reply priming rides along with the new message so that the
         // three segments add up exactly to the estimated prompt.
         long inputTokens = counter.count(userMessage) + BpeTokenCounter.TOKENS_PER_REPLY;
@@ -81,7 +91,7 @@ public class ContextPlanner {
 
         int dropped = 0;
         if (policy == OverflowPolicy.TRIM) {
-            long fixed = systemTokens + inputTokens + templateTokens + reserved;
+            long fixed = systemTokens + summaryTokens + inputTokens + templateTokens + reserved;
             while (dropped < replayed.size() && fixed + historyTokens > window) {
                 historyTokens -= perMessage[dropped];
                 dropped++;
@@ -96,17 +106,22 @@ public class ContextPlanner {
         }
 
         ContextBudget budget = new ContextBudget(config.model(), window, systemTokens,
-                historyTokens, inputTokens, templateTokens, reserved, dropped,
-                overhead.calibrated(config.model()), warnAt);
+                summaryTokens, historyTokens, inputTokens, templateTokens, reserved, dropped,
+                replacedTokens(summary), overhead.calibrated(config.model()), warnAt);
 
         // OFF deliberately sends anyway, so the provider's own rejection can be observed.
         if (budget.overflowing() && policy != OverflowPolicy.OFF) {
             throw new ContextOverflowException(budget);
         }
 
-        List<Message> messages = new ArrayList<>(replayed.size() + 2);
+        List<Message> messages = new ArrayList<>(replayed.size() + 3);
         if (system != null) {
             messages.add(system);
+        }
+        // Before the retained turns, so the model reads the dialogue in chronological order:
+        // what it has forgotten, then what it still has verbatim.
+        if (recall != null) {
+            messages.add(recall);
         }
         messages.addAll(replayed);
         messages.add(userMessage);
@@ -117,7 +132,7 @@ public class ContextPlanner {
      * Prices a dialogue with no new message — what the page shows before anything is typed,
      * so the window filling up is visible turn by turn rather than only at the moment it breaks.
      */
-    public ContextBudget budget(AgentConfig config, List<Message> history) {
+    public ContextBudget budget(AgentConfig config, Summary summary, List<Message> history) {
         long systemTokens = hasSystemPrompt(config) ? counter.count(Message.system(config.systemPrompt())) : 0L;
         long historyTokens = 0L;
         if (history != null) {
@@ -126,8 +141,26 @@ public class ContextPlanner {
             }
         }
         return new ContextBudget(config.model(), windowFor(config.model()), systemTokens,
-                historyTokens, 0L, overhead.forModel(config.model()), reserved(config), 0,
+                counter.count(recallMessage(summary)), historyTokens, 0L,
+                overhead.forModel(config.model()), reserved(config), 0, replacedTokens(summary),
                 overhead.calibrated(config.model()), warnAt);
+    }
+
+    /**
+     * The summary rides as its own system message rather than being glued onto the system
+     * prompt: the prompt is an instruction the user edits, the summary is recalled state, and
+     * the label is what stops the model from reading stale notes as a fresh directive.
+     */
+    private static Message recallMessage(Summary summary) {
+        if (summary == null || !summary.isPresent()) {
+            return null;
+        }
+        return Message.system("Notes on the earlier part of this conversation, which is no "
+                + "longer included verbatim. Treat them as established fact:\n" + summary.text());
+    }
+
+    private static long replacedTokens(Summary summary) {
+        return (summary == null) ? 0L : summary.replacedTokens();
     }
 
     public OverflowPolicy policy() {

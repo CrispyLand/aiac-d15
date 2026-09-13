@@ -85,6 +85,49 @@
         /* The compressed head of the dialogue — sits where the messages it replaced used to be. */
         .turn.summary { background: #e9fbf3; border: 1px dashed #63d3a6; }
         .turn.summary .who { color: #0b7a5b; }
+        /* The key/value block — pinned above the stream, replacing nothing and outranking everything. */
+        .turn.facts { background: #fbf0fe; border: 1px dashed #d0a5e8; }
+        .turn.facts .who { color: #862e9c; }
+        .facttable { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .facttable td { padding: 4px 0; border-bottom: 1px solid #f0dcfa; vertical-align: top; }
+        .facttable tr:last-child td { border-bottom: 0; }
+        .facttable td:first-child { width: 30%; color: #862e9c; font-weight: 600;
+                                    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                                    font-size: 12px; padding-right: 12px; }
+
+        /* Still stored, still on screen, but outside the window the strategy is willing to send. */
+        .turn.out { opacity: .4; }
+        .out .who::after { content: ' · not sent'; color: #e8590c; font-weight: 600; }
+
+        /* Strategy tabs — the three answers to "the dialogue no longer fits". */
+        .tabs { display: flex; gap: 8px; margin-bottom: 18px; }
+        .tab {
+            flex: 1; display: block; text-decoration: none; padding: 12px 14px;
+            background: #eceef1; border: 1px solid var(--line); border-radius: 9px;
+            color: var(--muted); font-size: 12px; line-height: 1.4;
+        }
+        .tab:hover { background: #e4e7eb; }
+        .tab b { display: block; font-size: 14px; color: #40454d; margin-bottom: 3px; }
+        .tab.on { background: var(--card); border-color: var(--accent); color: var(--ink);
+                  box-shadow: inset 0 3px 0 var(--accent); }
+        .tab.on b { color: var(--accent); }
+        /* Branches sit under the tabs because they are not a fourth tab: they compose with all
+           three. Whatever strategy is selected, it runs inside whichever branch is open. */
+        .branches { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                    margin: -8px 0 18px; font-size: 12px; color: var(--muted); }
+        .bchip { background: #eceef1; border: 1px solid var(--line); border-radius: 999px;
+                 padding: 5px 12px; font-size: 12px; font-weight: 600; color: var(--muted); }
+        .bchip:hover { background: #e4e7eb; color: var(--ink); }
+        .bchip.on { background: #f3e8fb; border-color: #ae3ec9; color: #862e9c; cursor: default; }
+        .bchip .at { font-weight: 400; opacity: .7; }
+        .bname { border: 1px solid var(--line); border-radius: 7px; padding: 5px 9px;
+                 font-size: 12px; width: 120px; }
+        .fork { background: transparent; border: 1px solid var(--line); color: var(--muted);
+                border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
+        .fork:hover { border-color: #ae3ec9; color: #862e9c; }
+        .turnhead .fork { visibility: hidden; }
+        .turn:hover .fork { visibility: visible; }
+
         .bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
         .ghost { background: transparent; color: var(--muted); border: 1px solid var(--line);
                  padding: 6px 12px; font-size: 12px; font-weight: 600; }
@@ -100,6 +143,7 @@
         .seg { height: 100%; }
         .seg.sys { background: #7048e8; }
         .seg.sum { background: #0ca678; }
+        .seg.facts { background: #ae3ec9; }
         .seg.hist { background: #3b5bdb; }
         .seg.input { background: #22b8cf; }
         .seg.tmpl { background: #f76707; }
@@ -141,7 +185,41 @@
     <h1>Agent Chat</h1>
     <div class="sub">Spring Boot &rarr; <code>com.crispyland.agent</code> &rarr; Groq chat completions</div>
 
+    <!-- Three answers to the same problem. Plain links, not JavaScript: a tab is a URL, so it
+         survives a reload, a back button and a paste into a bug report. The conversation itself
+         is untouched by the switch — only how it is packed into the next prompt changes. -->
+    <div class="tabs">
+        <a th:each="s : ${strategies}" class="tab" th:classappend="${s == strategy} ? 'on'"
+           th:href="@{/(strategy=${s.id})}">
+            <b th:text="${s.label}">Sliding window</b>
+            <span th:text="${s.tagline}"></span>
+        </a>
+    </div>
+
+    <!-- Which line of the conversation is open. Not a fourth tab: a branch is the same dialogue
+         under a different storage key, so the strategy above still decides how it is packed. -->
+    <div class="branches">
+        <span>branch</span>
+        <button th:each="b : ${branches}" type="submit" form="switchForm" name="branch"
+                class="bchip" th:classappend="${b.id == branch} ? 'on'"
+                th:value="${b.id}" th:disabled="${b.id == branch}">
+            <span th:text="${b.name}">main</span>
+            <span class="at" th:unless="${b.trunk}" th:text="'· from msg ' + ${b.forkedAt}"></span>
+        </button>
+        <input class="bname" type="text" name="name" form="forkForm" maxlength="24"
+               placeholder="new branch name"/>
+        <button type="submit" form="forkForm" name="at" value="-1" class="ghost"
+                title="Copy the whole conversation so far onto a new branch and continue there.">
+            Fork from here
+        </button>
+    </div>
+
     <form method="post" action="/">
+
+        <!-- Carries the open tab through the POST. The tabs are GET links, the send is a POST,
+             and without this the answer would come back under whichever strategy is the default. -->
+        <input type="hidden" name="contextStrategy" th:value="${form.contextStrategy}"/>
+
 
         <!-- 1. Parameters -->
         <div class="card">
@@ -174,24 +252,6 @@
                             <option th:each="e : ${reasoningEfforts}" th:value="${e}"
                                     th:text="${e.isEmpty()} ? '(omit — for non-gpt-oss models)' : ${e}"
                                     th:selected="${e == form.reasoningEffort}"></option>
-                        </select>
-                    </div>
-                    <!-- A select, not a checkbox: an unticked box posts nothing, and "nothing"
-                         already means "use the default" everywhere else on this form.
-                         Compared with == rather than negated with !: a post that omits the field
-                         still binds to null (a stale form, or any client that doesn't send it),
-                         and SpEL's ! cannot unbox null — the whole page 500s into a blank screen
-                         over one dropdown. == is null-safe and simply selects neither option. -->
-                    <div class="field">
-                        <label for="compressHistory">History compression
-                            <span class="hint">— flip it to compare the same chat both ways</span></label>
-                        <select id="compressHistory" name="compressHistory">
-                            <option value="true" th:selected="${form.compressHistory == true}">
-                                on — summarize older turns
-                            </option>
-                            <option value="false" th:selected="${form.compressHistory == false}">
-                                off — replay the full transcript
-                            </option>
                         </select>
                     </div>
                 </div>
@@ -232,9 +292,29 @@
                 No messages yet — the agent will remember every turn you send.
             </div>
 
+            <!-- Pinned at the top of the stream rather than inline, because unlike the summary
+                 it does not stand in for any particular messages — it stands in for all of them. -->
+            <div class="turn facts" th:if="${strategy.name() == 'STICKY_FACTS' and facts != null and facts.present}">
+                <div class="turnhead">
+                    <span class="who">facts · rev <span th:text="${facts.revision}">0</span></span>
+                    <span class="mstats">
+                        <b th:text="${facts.size}">0</b> of <b th:text="${maxFacts}">12</b> slots
+                        · cost <b th:text="${#numbers.formatInteger(facts.buildTokens, 1, 'COMMA')}">0</b>
+                        tok to maintain
+                    </span>
+                </div>
+                <table class="facttable">
+                    <tr th:each="f : ${facts.entries}">
+                        <td th:text="${f.key}">database</td>
+                        <td th:text="${f.value}">Postgres 16</td>
+                    </tr>
+                </table>
+            </div>
+
             <!-- Stands exactly where the messages it replaced used to be: this is the whole
                  conversation, it is just that the head of it is no longer made of messages. -->
-            <div class="turn summary" th:if="${summary != null and summary.present}">
+            <div class="turn summary"
+                 th:if="${strategy.name() == 'SUMMARY' and summary != null and summary.present}">
                 <div class="turnhead">
                     <span class="who">summary · rev <span th:text="${summary.revision}">0</span></span>
                     <span class="mstats">
@@ -248,10 +328,20 @@
                 <div class="body" th:text="${summary.text}"></div>
             </div>
 
-            <div th:each="m : ${transcript}" class="turn"
-                 th:classappend="${m.user} ? 'user' : 'assistant'">
+            <!-- Greyed out rather than hidden: the difference between "the agent has forgotten
+                 this" and "this never happened" is the whole lesson of the sliding window. -->
+            <div th:each="m, it : ${transcript}" class="turn"
+                 th:classappend="(${m.user} ? 'user' : 'assistant')
+                                 + (${budget != null and it.index < budget.windowedMessages} ? ' out' : '')">
                 <div class="turnhead">
                     <span class="who" th:text="${m.user} ? 'you' : 'agent'"></span>
+                    <!-- A checkpoint at this message: everything above it is carried over, and
+                         everything below it stays on this branch only. -->
+                    <button type="submit" form="forkForm" name="at" class="fork"
+                            th:value="${it.index + 1}"
+                            title="Start a branch from this point — the rest of this conversation stays here.">
+                        fork here
+                    </button>
                     <span class="mstats" th:if="${m.stats != null}">
                         <span th:if="${m.user}">
                             prompt <b th:text="${m.stats.promptTokens}">0</b> tok
@@ -283,6 +373,7 @@
             <div class="track">
                 <span class="seg sys" th:style="'width:' + ${budget.systemPercent} + '%'"></span>
                 <span class="seg sum" th:style="'width:' + ${budget.summaryPercent} + '%'"></span>
+                <span class="seg facts" th:style="'width:' + ${budget.factsPercent} + '%'"></span>
                 <span class="seg hist" th:style="'width:' + ${budget.historyPercent} + '%'"></span>
                 <span class="seg input" th:style="'width:' + ${budget.inputPercent} + '%'"></span>
                 <span class="seg tmpl" th:style="'width:' + ${budget.overheadPercent} + '%'"></span>
@@ -295,6 +386,8 @@
                       <b th:text="${#numbers.formatInteger(budget.systemTokens, 1, 'COMMA')}">0</b></span>
                 <span th:if="${budget.compressed}"><i style="background:#0ca678"></i>summary
                       <b th:text="${#numbers.formatInteger(budget.summaryTokens, 1, 'COMMA')}">0</b></span>
+                <span th:if="${budget.hasFacts}"><i style="background:#ae3ec9"></i>facts
+                      <b th:text="${#numbers.formatInteger(budget.factsTokens, 1, 'COMMA')}">0</b></span>
                 <span><i style="background:#3b5bdb"></i>history
                       <b th:text="${#numbers.formatInteger(budget.historyTokens, 1, 'COMMA')}">0</b></span>
                 <span th:if="${budget.inputTokens > 0}"><i style="background:#22b8cf"></i>new message
@@ -332,6 +425,16 @@
                             ${budget.savedPercent} + '%)'">0</b>
                 on this call and on every call after it.
             </div>
+            <!-- Not a failure: this is the strategy doing exactly what it says it does. The
+                 messages are still on disk and still on screen, greyed out — the model simply
+                 never sees them, which is why this tab costs nothing extra and forgets absolutely. -->
+            <div class="note info" th:if="${budget.windowed}">
+                <b th:text="${strategy.label}">Sliding window</b> is sending the last
+                <b th:text="${windowMessages}">6</b> messages.
+                <b th:text="${budget.windowedMessages}">0</b> older message(s) are still stored but
+                are not in this prompt — anything agreed in them is, as far as the model is
+                concerned, gone.
+            </div>
             <div class="note info" th:if="${budget.trimmed}">
                 Trim policy dropped the
                 <b th:text="${budget.droppedMessages}">0</b> oldest message(s) to make this call fit —
@@ -357,8 +460,19 @@
         </div>
     </form>
 
-    <!-- Sibling form: HTML forbids nesting, so the New chat button targets it by id. -->
-    <form id="resetForm" method="post" action="/reset"></form>
+    <!-- Sibling forms: HTML forbids nesting, so buttons inside the main form target these by id.
+         The submitting button carries the interesting value (which branch, which message), which
+         is why one form each is enough for all of them. -->
+    <form id="resetForm" method="post" action="/reset">
+        <!-- Come back to the tab you were on, not to the default one. -->
+        <input type="hidden" name="strategy" th:value="${form.contextStrategy}"/>
+    </form>
+    <form id="switchForm" method="post" action="/branch/switch">
+        <input type="hidden" name="strategy" th:value="${form.contextStrategy}"/>
+    </form>
+    <form id="forkForm" method="post" action="/branch/fork">
+        <input type="hidden" name="strategy" th:value="${form.contextStrategy}"/>
+    </form>
 
     <div class="card error" th:if="${error}">
         <h2>Something went wrong</h2>

@@ -32,6 +32,7 @@ public class JsonFileConversationStore implements ConversationStore {
 
     private final Map<String, List<Message>> conversations = new ConcurrentHashMap<>();
     private final Map<String, Summary> summaries = new ConcurrentHashMap<>();
+    private final Map<String, Facts> facts = new ConcurrentHashMap<>();
     private final ObjectMapper mapper;
     private final Path file;
     private final int maxMessages;
@@ -76,9 +77,33 @@ public class JsonFileConversationStore implements ConversationStore {
     }
 
     @Override
+    public Facts facts(String conversationId) {
+        return facts.getOrDefault(conversationId, Facts.EMPTY);
+    }
+
+    @Override
+    public void saveFacts(String conversationId, Facts updated) {
+        facts.put(conversationId, updated);
+        flush();
+    }
+
+    @Override
+    public int copy(String fromConversationId, String toConversationId, int messages) {
+        List<Message> source = history(fromConversationId);
+        List<Message> copied = Conversations.head(source, messages);
+        conversations.put(toConversationId, copied);
+        summaries.put(toConversationId, summary(fromConversationId));
+        facts.put(toConversationId, (copied.size() == source.size())
+                ? facts(fromConversationId) : Facts.EMPTY);
+        flush();
+        return copied.size();
+    }
+
+    @Override
     public void clear(String conversationId) {
         conversations.remove(conversationId);
         summaries.remove(conversationId);
+        facts.remove(conversationId);
         flush();
     }
 
@@ -101,6 +126,10 @@ public class JsonFileConversationStore implements ConversationStore {
                 JsonNode summary = entry.path("summary");
                 if (summary.isObject()) {
                     summaries.put(id, readSummary(summary));
+                }
+                JsonNode stickyFacts = entry.path("facts");
+                if (stickyFacts.isObject()) {
+                    facts.put(id, readFacts(stickyFacts));
                 }
             });
             log.info("Restored {} conversation(s) from {}", conversations.size(), file.toAbsolutePath());
@@ -142,6 +171,10 @@ public class JsonFileConversationStore implements ConversationStore {
             if (summary != null && summary.isPresent()) {
                 writeSummary(entry.putObject("summary"), summary);
             }
+            Facts stickyFacts = facts.get(id);
+            if (stickyFacts != null && stickyFacts.isPresent()) {
+                writeFacts(entry.putObject("facts"), stickyFacts);
+            }
             ArrayNode array = entry.putArray("messages");
             for (Message message : messages) {
                 ObjectNode node = array.addObject();
@@ -170,6 +203,26 @@ public class JsonFileConversationStore implements ConversationStore {
                 (int) number(node.path("coveredMessages")),
                 number(node.path("replacedTokens")),
                 number(node.path("buildTokens")));
+    }
+
+    /** An array, not an object: the order facts were learned in is part of how the block reads. */
+    private static void writeFacts(ObjectNode node, Facts facts) {
+        node.put("revision", facts.revision());
+        node.put("buildTokens", facts.buildTokens());
+        ArrayNode array = node.putArray("entries");
+        for (Facts.Fact fact : facts.entries()) {
+            ObjectNode entry = array.addObject();
+            entry.put("key", fact.key());
+            entry.put("value", fact.value());
+        }
+    }
+
+    private static Facts readFacts(JsonNode node) {
+        List<Facts.Fact> entries = new ArrayList<>();
+        for (JsonNode entry : node.path("entries")) {
+            entries.add(new Facts.Fact(text(entry.path("key")), text(entry.path("value"))));
+        }
+        return new Facts(entries, (int) number(node.path("revision")), number(node.path("buildTokens")));
     }
 
     private static void writeStats(ObjectNode node, MessageStats stats) {

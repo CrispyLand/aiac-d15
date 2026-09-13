@@ -28,6 +28,24 @@ final class Conversations {
         return excess > 0 ? new ArrayList<>(updated.subList(excess, updated.size())) : updated;
     }
 
+    /**
+     * Returns the {@code count} oldest messages — the half of a fork that is kept. A cut that
+     * would leave a user message without its reply is moved back one, because a dangling user
+     * turn reads to the model as a question it already refused to answer.
+     *
+     * @param count {@code < 0} or beyond the end means the whole stack
+     */
+    static List<Message> head(List<Message> existing, int count) {
+        if (existing == null) {
+            return new ArrayList<>();
+        }
+        if (count < 0 || count >= existing.size()) {
+            return new ArrayList<>(existing);
+        }
+        int cut = (count > 0 && existing.get(count - 1).isUser()) ? count - 1 : count;
+        return new ArrayList<>(existing.subList(0, cut));
+    }
+
     /** Removes the {@code count} oldest messages, once a summary has taken their place. */
     static List<Message> drop(List<Message> existing, int count) {
         if (existing == null || count <= 0) {

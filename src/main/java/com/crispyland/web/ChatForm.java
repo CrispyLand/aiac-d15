@@ -1,12 +1,17 @@
 package com.crispyland.web;
 
 import com.crispyland.agent.AgentConfig;
+import com.crispyland.agent.ContextStrategy;
 import java.util.Arrays;
 import java.util.List;
 
 /**
  * Exactly what the HTML form posts. Its only job is to become an {@link AgentConfig};
  * any field left empty stays null so the agent applies its configured default.
+ * <p>
+ * {@code contextStrategy} is carried as a String rather than the enum on purpose: an unknown
+ * value has to fall back to the default, not fail the whole binding. A form field that can be
+ * edited from a URL should never be able to turn a typo into a 400.
  */
 public record ChatForm(
         String userInput,
@@ -17,7 +22,7 @@ public record ChatForm(
         String reasoningEffort,
         String stopSequences,
         String responseSchema,
-        Boolean compressHistory) {
+        String contextStrategy) {
 
     public AgentConfig toAgentConfig() {
         return AgentConfig.builder()
@@ -28,7 +33,7 @@ public record ChatForm(
                 .reasoningEffort(reasoningEffort)
                 .stopSequences(parseStopSequences())
                 .responseSchema(responseSchema)
-                .compressHistory(compressHistory)
+                .contextStrategy(ContextStrategy.from(contextStrategy))
                 .build();
     }
 
@@ -43,7 +48,7 @@ public record ChatForm(
                 config.reasoningEffort(),
                 String.join(", ", config.stopSequencesOrEmpty()),
                 config.responseSchema(),
-                config.compressHistoryEnabled());
+                config.contextStrategyOrDefault().id());
     }
 
     private List<String> parseStopSequences() {

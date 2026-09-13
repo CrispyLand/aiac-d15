@@ -17,6 +17,19 @@ public interface ConversationStore {
      */
     Summary summary(String conversationId);
 
+    /**
+     * What the dialogue has settled, as key/value. Never null; {@link Facts#EMPTY} until the
+     * sticky-facts strategy has run at least once.
+     */
+    Facts facts(String conversationId);
+
+    /**
+     * Replaces the fact block wholesale. Unlike {@link #compact}, this touches no messages:
+     * facts are a <em>view</em> of a transcript that is still there in full, which is why
+     * leaving the facts tab costs nothing and loses nothing.
+     */
+    void saveFacts(String conversationId, Facts facts);
+
     /** Appends messages to the stack, applying whatever retention policy the store has. */
     void append(String conversationId, List<Message> messages);
 
@@ -26,6 +39,24 @@ public interface ConversationStore {
      * compression is that the summary is what remains of them, here and in the prompt alike.
      */
     void compact(String conversationId, Summary summary, int foldedMessages);
+
+    /**
+     * Copies the first {@code messages} messages of one conversation onto another id, together
+     * with the memories derived from them — a checkpoint, and the only primitive branching needs.
+     * <p>
+     * The summary always comes along: folding only ever removes the <em>oldest</em> messages, so
+     * whatever it covers is behind any cut point by construction. The fact block only comes along
+     * when the copy is of the whole conversation. A block is keyed, not message-addressable, so
+     * there is no way to rewind it by four messages — and a branch that starts before a decision
+     * while still holding that decision as an established fact is a worse answer than one that
+     * starts empty and learns again.
+     *
+     * @param messages how many of the oldest messages to keep; {@code < 0} or beyond the end
+     *                 means the whole stack
+     * @return how many were actually copied, which is what the caller should record — the cut
+     *         moves back a message rather than separate a question from its answer
+     */
+    int copy(String fromConversationId, String toConversationId, int messages);
 
     void clear(String conversationId);
 }

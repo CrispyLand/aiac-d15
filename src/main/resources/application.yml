@@ -63,6 +63,10 @@ agent:
     store: json
     file: ./data/conversations.json
 
+    # Which lines the conversation has been split into, and which one is open. Refs only —
+    # a branch's messages live in the file above, under `<conversation-id>/<branch-id>`.
+    branch-file: ./data/branches.json
+
   # The second window. max-messages above bounds the dialogue in messages; the model bills
   # and rejects in tokens, so the prompt is priced locally before every call.
   context:
@@ -85,14 +89,58 @@ agent:
     # Fraction of the window at which the page starts warning.
     warn-at: 0.80
 
+  # How the prompt is packed out of a conversation too long to send whole. The three tabs on
+  # the page are these three values; everything else in this file applies to all of them.
+  #
+  #   sliding-window  last N messages, nothing else. Free, and forgets absolutely.
+  #   sticky-facts    a key/value block of what has been decided, plus the last N messages.
+  #   summary         old turns rewritten into notes, tuned under `compression` below.
+  #
+  # Only the active strategy's memory is maintained, so switching tabs does not keep paying
+  # for a summary or an extraction that nothing is going to read.
+  strategy:
+    # Which tab the page opens on.
+    initial: sliding-window
+
+    # The verbatim tail for sliding-window and sticky-facts, counted in messages (1 turn = 2).
+    # Ignored by summary, which folds the transcript in the store rather than cutting it here —
+    # its own tail is compression.keep-recent-messages.
+    #
+    # These two strategies cut at *read* time and leave the stored transcript alone, which is
+    # what makes switching between them non-destructive. Summary is the odd one out: it deletes.
+    window-messages: 6
+
+  # The key/value memory behind the `sticky-facts` tab. Applies only while that tab is selected.
+  #
+  # Note the cost shape, because it is the real difference between this and compression:
+  # summarization pays ~500 tokens once every fifth turn, this pays ~150-300 tokens on EVERY
+  # turn. Over a short conversation that makes facts the more expensive of the two; over a long
+  # one the summary's fold cost keeps recurring while the fact block stops growing at max-facts.
+  facts:
+    # Blank = agent.defaults.model. Extraction is a mechanical rewrite, not a reasoning task,
+    # so the small model is the right default here for the same reason it is for summaries.
+    model: openai/gpt-oss-20b
+
+    # Ceiling on the block, and therefore on this segment of every future prompt. Bounding it by
+    # count rather than tokens is deliberate: it is a list, and a list that silently loses its
+    # tail is worse than one that refuses to grow.
+    max-facts: 12
+
+    # Ceiling on the extraction reply. Shared with gpt-oss's hidden reasoning tokens, which are
+    # spent first — the same trap that truncated the Day 9 summary into "- Nur,". A truncated
+    # block is data loss here too, because the block is replaced wholesale rather than appended
+    # to, so the extractor refuses a finish_reason=length reply and keeps the previous facts.
+    max-tokens: 600
+
+    # "" omits the parameter (required for qwen/compound). On gpt-oss `low` keeps most of the
+    # ceiling available for the facts themselves.
+    reasoning-effort: low
+
   # The third answer to a growing prompt. max-messages and overflow-policy both shrink the
   # context by forgetting; this one rewrites the old turns into notes and sends those instead,
   # so the cost stops growing without the dialogue losing what happened.
+  # Applies only while `summary` is the selected strategy.
   compression:
-    # Default for new turns — the page can flip it per turn, which is how you compare the same
-    # conversation with and without it.
-    enabled: true
-
     # The tail that is always sent verbatim. Recency is where pronouns, corrections and
     # "no, the other one" live, and a summary is a poor substitute for the last few turns.
     keep-recent-messages: 6

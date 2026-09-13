@@ -12,7 +12,7 @@ import java.util.Objects;
  * {@code withFallback}, one line in the yml defaults.
  * <p>
  * Not all of it is sent to the provider: {@code maxCompletionTokens} doubles as the slice of
- * the window reserved for the reply, and {@code compressHistory} never leaves the process at
+ * the window reserved for the reply, and {@code contextStrategy} never leaves the process at
  * all — it decides how the context is assembled, which is what makes it worth having on the
  * page as a switch you can flip between two otherwise identical turns.
  */
@@ -24,7 +24,7 @@ public record AgentConfig(
         String reasoningEffort,
         List<String> stopSequences,
         String responseSchema,
-        Boolean compressHistory) {
+        ContextStrategy contextStrategy) {
 
     public AgentConfig {
         stopSequences = (stopSequences == null) ? null : List.copyOf(stopSequences);
@@ -43,7 +43,7 @@ public record AgentConfig(
                 .reasoningEffort(reasoningEffort)
                 .stopSequences(stopSequences)
                 .responseSchema(responseSchema)
-                .compressHistory(compressHistory);
+                .contextStrategy(contextStrategy);
     }
 
     /**
@@ -60,12 +60,26 @@ public record AgentConfig(
                 text(reasoningEffort, defaults.reasoningEffort()),
                 stopSequences != null ? stopSequences : defaults.stopSequences(),
                 text(responseSchema, defaults.responseSchema()),
-                compressHistory != null ? compressHistory : defaults.compressHistory());
+                contextStrategy != null ? contextStrategy : defaults.contextStrategy());
     }
 
-    /** Compression is opt-out rather than opt-in once the defaults have been merged in. */
+    /** Never null after the defaults have been merged in; falls back to the safest strategy. */
+    public ContextStrategy contextStrategyOrDefault() {
+        return (contextStrategy == null) ? ContextStrategy.SLIDING_WINDOW : contextStrategy;
+    }
+
+    /**
+     * Whether this turn should fold its backlog into notes. Derived rather than configured:
+     * the summary is only maintained while it is the strategy being used, so that switching
+     * tabs does not quietly keep paying for a rewrite nothing is reading.
+     */
     public boolean compressHistoryEnabled() {
-        return Boolean.TRUE.equals(compressHistory);
+        return contextStrategyOrDefault() == ContextStrategy.SUMMARY;
+    }
+
+    /** Same reasoning for the fact block: extracted only while the facts strategy is active. */
+    public boolean stickyFactsEnabled() {
+        return contextStrategyOrDefault() == ContextStrategy.STICKY_FACTS;
     }
 
     public List<String> stopSequencesOrEmpty() {
@@ -92,7 +106,7 @@ public record AgentConfig(
         private String reasoningEffort;
         private List<String> stopSequences;
         private String responseSchema;
-        private Boolean compressHistory;
+        private ContextStrategy contextStrategy;
 
         public Builder model(String model) {
             this.model = model;
@@ -129,14 +143,14 @@ public record AgentConfig(
             return this;
         }
 
-        public Builder compressHistory(Boolean compressHistory) {
-            this.compressHistory = compressHistory;
+        public Builder contextStrategy(ContextStrategy contextStrategy) {
+            this.contextStrategy = contextStrategy;
             return this;
         }
 
         public AgentConfig build() {
             return new AgentConfig(model, systemPrompt, temperature, maxCompletionTokens,
-                    reasoningEffort, stopSequences, responseSchema, compressHistory);
+                    reasoningEffort, stopSequences, responseSchema, contextStrategy);
         }
     }
 }

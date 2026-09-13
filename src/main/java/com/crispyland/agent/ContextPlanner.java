@@ -1,5 +1,7 @@
 package com.crispyland.agent;
 
+import com.crispyland.agent.memory.Facts;
+import com.crispyland.agent.memory.MemoryState;
 import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.memory.Summary;
 import com.crispyland.agent.usage.BpeTokenCounter;
@@ -21,9 +23,12 @@ import java.util.Map;
  * second window, measured in the unit that can actually overflow.
  * <p>
  * Both windows are subtractive — they answer a prompt that is too long by sending less of it.
- * The summary is the third option: the compressed head of the dialogue arrives as one bounded
- * message standing in for the turns that are no longer sent, so the prompt shrinks without the
- * conversation losing what happened in them.
+ * The summary and the fact block are the alternatives: bounded stand-ins for turns that are no
+ * longer sent, so the prompt shrinks without the conversation losing what happened in them.
+ * <p>
+ * Which of those is used is {@link ContextStrategy}, and this class is the one place that knows
+ * the difference. Everything downstream — the request builder, the store, the page — sees only
+ * a list of messages and a priced budget, so adding a strategy is a change here and nowhere else.
  */
 public class ContextPlanner {
 
@@ -41,47 +46,62 @@ public class ContextPlanner {
     private final int defaultWindow;
     private final OverflowPolicy policy;
     private final double warnAt;
+    private final int windowMessages;
 
     public ContextPlanner(TokenCounter counter,
                           TemplateOverhead overhead,
                           Map<String, Integer> contextWindows,
                           int defaultWindow,
                           OverflowPolicy policy,
-                          double warnAt) {
+                          double warnAt,
+                          int windowMessages) {
         this.counter = counter;
         this.overhead = overhead;
         this.contextWindows = (contextWindows == null) ? Map.of() : Map.copyOf(contextWindows);
         this.defaultWindow = defaultWindow;
         this.policy = (policy == null) ? OverflowPolicy.FAIL : policy;
         this.warnAt = warnAt;
+        this.windowMessages = windowMessages;
     }
 
     /**
-     * Prices the system prompt, the summary, the replayed history and the new message against
-     * the model's window, applies the overflow policy, and returns the message array to send.
+     * Prices the system prompt, the recalled state, the replayed history and the new message
+     * against the model's window, applies the overflow policy, and returns the array to send.
+     * <p>
+     * The recalled state is whichever of the summary or the fact block the strategy uses; both
+     * are sent <em>instead of</em> the messages they stand for, never in addition to them.
      *
-     * @param summary stands in for whatever has been compressed out of {@code history}; it is
-     *                sent instead of those messages, not in addition to them
      * @throws ContextOverflowException under {@link OverflowPolicy#FAIL}, or under
      *         {@link OverflowPolicy#TRIM} when even an empty history does not fit
      */
-    public ContextPlan plan(AgentConfig config, Summary summary, List<Message> history, String input) {
+    public ContextPlan plan(AgentConfig config, MemoryState memory, String input) {
+        MemoryState state = (memory == null) ? MemoryState.EMPTY : memory;
+        ContextStrategy strategy = config.contextStrategyOrDefault();
+
         // The system prompt is re-applied fresh each turn rather than stored, so editing it
         // on the page takes effect immediately — and is re-paid for on every single call.
         Message system = hasSystemPrompt(config) ? Message.system(config.systemPrompt()) : null;
-        Message recall = recallMessage(summary);
+        Message recall = (strategy == ContextStrategy.SUMMARY) ? recallMessage(state.summary()) : null;
+        Message factsNote = (strategy == ContextStrategy.STICKY_FACTS) ? factsMessage(state.facts()) : null;
         Message userMessage = Message.user(input);
 
         long systemTokens = counter.count(system);
         long summaryTokens = counter.count(recall);
+        long factsTokens = counter.count(factsNote);
         // The once-per-request reply priming rides along with the new message so that the
-        // three segments add up exactly to the estimated prompt.
+        // segments add up exactly to the estimated prompt.
         long inputTokens = counter.count(userMessage) + BpeTokenCounter.TOKENS_PER_REPLY;
         long reserved = reserved(config);
         long window = windowFor(config.model());
         long templateTokens = overhead.forModel(config.model());
 
-        List<Message> replayed = (history == null) ? List.of() : history;
+        // The strategy's own window comes first: under SUMMARY the transcript has already been
+        // physically folded, so the cut is a no-op; under the other two the store keeps
+        // everything and only the tail is sent, which is what makes switching tabs reversible.
+        List<Message> stored = state.history();
+        int windowedOut = windowStart(strategy, stored);
+        List<Message> replayed = stored.subList(windowedOut, stored.size());
+
         long[] perMessage = new long[replayed.size()];
         long historyTokens = 0L;
         for (int i = 0; i < replayed.size(); i++) {
@@ -91,7 +111,7 @@ public class ContextPlanner {
 
         int dropped = 0;
         if (policy == OverflowPolicy.TRIM) {
-            long fixed = systemTokens + summaryTokens + inputTokens + templateTokens + reserved;
+            long fixed = systemTokens + summaryTokens + factsTokens + inputTokens + templateTokens + reserved;
             while (dropped < replayed.size() && fixed + historyTokens > window) {
                 historyTokens -= perMessage[dropped];
                 dropped++;
@@ -105,16 +125,17 @@ public class ContextPlanner {
             replayed = replayed.subList(dropped, replayed.size());
         }
 
-        ContextBudget budget = new ContextBudget(config.model(), window, systemTokens,
-                summaryTokens, historyTokens, inputTokens, templateTokens, reserved, dropped,
-                replacedTokens(summary), overhead.calibrated(config.model()), warnAt);
+        ContextBudget budget = new ContextBudget(config.model(), strategy, window, systemTokens,
+                summaryTokens, factsTokens, historyTokens, inputTokens, templateTokens, reserved,
+                dropped, windowedOut, replacedTokens(strategy, state.summary()),
+                overhead.calibrated(config.model()), warnAt);
 
         // OFF deliberately sends anyway, so the provider's own rejection can be observed.
         if (budget.overflowing() && policy != OverflowPolicy.OFF) {
             throw new ContextOverflowException(budget);
         }
 
-        List<Message> messages = new ArrayList<>(replayed.size() + 3);
+        List<Message> messages = new ArrayList<>(replayed.size() + 4);
         if (system != null) {
             messages.add(system);
         }
@@ -122,6 +143,9 @@ public class ContextPlanner {
         // what it has forgotten, then what it still has verbatim.
         if (recall != null) {
             messages.add(recall);
+        }
+        if (factsNote != null) {
+            messages.add(factsNote);
         }
         messages.addAll(replayed);
         messages.add(userMessage);
@@ -132,18 +156,45 @@ public class ContextPlanner {
      * Prices a dialogue with no new message — what the page shows before anything is typed,
      * so the window filling up is visible turn by turn rather than only at the moment it breaks.
      */
-    public ContextBudget budget(AgentConfig config, Summary summary, List<Message> history) {
+    public ContextBudget budget(AgentConfig config, MemoryState memory) {
+        MemoryState state = (memory == null) ? MemoryState.EMPTY : memory;
+        ContextStrategy strategy = config.contextStrategyOrDefault();
+
         long systemTokens = hasSystemPrompt(config) ? counter.count(Message.system(config.systemPrompt())) : 0L;
+        Message recall = (strategy == ContextStrategy.SUMMARY) ? recallMessage(state.summary()) : null;
+        Message factsNote = (strategy == ContextStrategy.STICKY_FACTS) ? factsMessage(state.facts()) : null;
+
+        List<Message> stored = state.history();
+        int windowedOut = windowStart(strategy, stored);
         long historyTokens = 0L;
-        if (history != null) {
-            for (Message message : history) {
-                historyTokens += counter.count(message);
-            }
+        for (Message message : stored.subList(windowedOut, stored.size())) {
+            historyTokens += counter.count(message);
         }
-        return new ContextBudget(config.model(), windowFor(config.model()), systemTokens,
-                counter.count(recallMessage(summary)), historyTokens, 0L,
-                overhead.forModel(config.model()), reserved(config), 0, replacedTokens(summary),
+
+        return new ContextBudget(config.model(), strategy, windowFor(config.model()), systemTokens,
+                counter.count(recall), counter.count(factsNote), historyTokens, 0L,
+                overhead.forModel(config.model()), reserved(config), 0, windowedOut,
+                replacedTokens(strategy, state.summary()),
                 overhead.calibrated(config.model()), warnAt);
+    }
+
+    /**
+     * Index of the first message the strategy is willing to send.
+     * <p>
+     * {@link ContextStrategy#SUMMARY} sends everything it still holds, because the folding has
+     * already happened in the store. The other two hold the whole transcript and cut at read
+     * time, realigning forward to a user message so the replay never opens mid-turn.
+     */
+    private int windowStart(ContextStrategy strategy, List<Message> history) {
+        if (strategy == ContextStrategy.SUMMARY || windowMessages <= 0
+                || history.size() <= windowMessages) {
+            return 0;
+        }
+        int start = history.size() - windowMessages;
+        if (!history.get(start).isUser()) {
+            start++;
+        }
+        return start;
     }
 
     /**
@@ -159,8 +210,25 @@ public class ContextPlanner {
                 + "longer included verbatim. Treat them as established fact:\n" + summary.text());
     }
 
-    private static long replacedTokens(Summary summary) {
-        return (summary == null) ? 0L : summary.replacedTokens();
+    /**
+     * Same reasoning as the summary, different promise. The wording is stronger because the
+     * point of a fact block is that it outranks the window: when the last six messages and the
+     * block disagree, the block is the one that was maintained deliberately.
+     */
+    private static Message factsMessage(Facts facts) {
+        if (facts == null || !facts.isPresent()) {
+            return null;
+        }
+        return Message.system("Established facts about this conversation, maintained across "
+                + "messages that are no longer included. Treat them as current and authoritative:\n"
+                + facts.render());
+    }
+
+    private static long replacedTokens(ContextStrategy strategy, Summary summary) {
+        if (strategy != ContextStrategy.SUMMARY || summary == null) {
+            return 0L;
+        }
+        return summary.replacedTokens();
     }
 
     public OverflowPolicy policy() {

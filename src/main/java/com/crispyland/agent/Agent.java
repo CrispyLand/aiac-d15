@@ -6,7 +6,10 @@ import com.crispyland.agent.llm.ChatRequest;
 import com.crispyland.agent.llm.ChatResponse;
 import com.crispyland.agent.llm.LlmClient;
 import com.crispyland.agent.memory.ConversationStore;
+import com.crispyland.agent.memory.FactExtractor;
+import com.crispyland.agent.memory.Facts;
 import com.crispyland.agent.memory.HistoryCompressor;
+import com.crispyland.agent.memory.MemoryState;
 import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.memory.MessageStats;
 import com.crispyland.agent.memory.Summary;
@@ -45,6 +48,7 @@ public class Agent {
     private final ConversationStore conversations;
     private final ContextPlanner contextPlanner;
     private final HistoryCompressor compressor;
+    private final FactExtractor extractor;
     private final TemplateOverhead templateOverhead;
     private final AgentConfig defaults;
 
@@ -56,6 +60,7 @@ public class Agent {
                  ConversationStore conversations,
                  ContextPlanner contextPlanner,
                  HistoryCompressor compressor,
+                 FactExtractor extractor,
                  TemplateOverhead templateOverhead,
                  AgentProperties properties) {
         this.llmClient = llmClient;
@@ -66,6 +71,7 @@ public class Agent {
         this.conversations = conversations;
         this.contextPlanner = contextPlanner;
         this.compressor = compressor;
+        this.extractor = extractor;
         this.templateOverhead = templateOverhead;
         this.defaults = properties.defaultConfig();
     }
@@ -87,12 +93,14 @@ public class Agent {
         // Before pricing, not after: the whole point is that this turn is the one that gets
         // cheaper, and the budget the caller is shown has to be the budget that was spent.
         int compacted = compressIfDue(id, effective);
-        List<Message> history = conversations.history(id);
-        Summary summary = conversations.summary(id);
+        Facts facts = updateFactsIfDue(id, effective, prompt);
+        MemoryState memory = new MemoryState(conversations.summary(id), facts,
+                conversations.history(id));
+        List<Message> history = memory.history();
 
         // Priced before a byte leaves the process: an oversized prompt is billed as a
         // rejection, so the cheapest place to find out it will not fit is here.
-        ContextPlanner.ContextPlan plan = contextPlanner.plan(effective, summary, history, prompt);
+        ContextPlanner.ContextPlan plan = contextPlanner.plan(effective, memory, prompt);
         ContextBudget budget = plan.budget();
         if (budget.trimmed()) {
             log.info("Context trim: dropped {} oldest message(s) to fit {} of {} tokens",
@@ -144,14 +152,50 @@ public class Agent {
         return conversations.summary(conversationId);
     }
 
+    /** What the dialogue has settled, as key/value — maintained only on the sticky-facts tab. */
+    public Facts facts(String conversationId) {
+        return conversations.facts(conversationId);
+    }
+
     /**
      * What the dialogue already costs, before anything new is typed. Lets the window be
      * watched as it fills rather than only at the turn that breaks it.
      */
     public ContextBudget budget(String conversationId, AgentConfig config) {
         AgentConfig effective = (config == null) ? defaults : config.withFallback(defaults);
-        return contextPlanner.budget(effective, conversations.summary(conversationId),
-                conversations.history(conversationId));
+        return contextPlanner.budget(effective, memory(conversationId));
+    }
+
+    /** The three forms of memory for one conversation, gathered so they are always consistent. */
+    private MemoryState memory(String conversationId) {
+        return new MemoryState(conversations.summary(conversationId),
+                conversations.facts(conversationId), conversations.history(conversationId));
+    }
+
+    /**
+     * Re-derives the fact block from the message about to be sent, so this turn already answers
+     * against it. Same bargain as compression: an extraction failure costs one turn of staleness,
+     * never the turn itself.
+     */
+    private Facts updateFactsIfDue(String id, AgentConfig config, String prompt) {
+        Facts current = conversations.facts(id);
+        if (!config.stickyFactsEnabled()) {
+            return current;
+        }
+        try {
+            return extractor.update(current, prompt)
+                    .map(updated -> {
+                        conversations.saveFacts(id, updated);
+                        log.info("Facts rev {} — {} fact(s) now stand in for the whole dialogue",
+                                updated.revision(), updated.size());
+                        return updated;
+                    })
+                    .orElse(current);
+        } catch (AgentException e) {
+            log.warn("Fact extraction failed ({}) — continuing with the previous facts.",
+                    e.getMessage());
+            return current;
+        }
     }
 
     /**

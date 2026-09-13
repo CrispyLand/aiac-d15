@@ -9,6 +9,7 @@ import com.crispyland.agent.llm.ChatRequest;
 import com.crispyland.agent.llm.ChatResponse;
 import com.crispyland.agent.llm.LlmClient;
 import com.crispyland.agent.llm.LlmException;
+import com.crispyland.agent.memory.FactExtractor;
 import com.crispyland.agent.memory.HistoryCompressor;
 import com.crispyland.agent.memory.InMemoryConversationStore;
 import com.crispyland.agent.memory.Message;
@@ -33,28 +34,32 @@ class AgentTest {
     private final TemplateOverhead overhead = new TemplateOverhead();
     private final Agent agent = newAgent(20);
 
-    /** Compression off by default, so the pre-existing turns are unaffected by it. */
+    /** Sliding window with no window set = replay everything, so these turns are unaffected. */
     private Agent newAgent(int maxMessages) {
-        return newAgent(maxMessages, planner(131_072, OverflowPolicy.FAIL), properties(false));
+        return newAgent(maxMessages, planner(131_072, OverflowPolicy.FAIL),
+                properties(ContextStrategy.SLIDING_WINDOW));
     }
 
     private Agent newAgent(int maxMessages, ContextPlanner planner) {
-        return newAgent(maxMessages, planner, properties(false));
+        return newAgent(maxMessages, planner, properties(ContextStrategy.SLIDING_WINDOW));
     }
 
     private Agent newAgent(int maxMessages, ContextPlanner planner, AgentProperties properties) {
         AgentProperties.Compression compression = properties.compression();
+        AgentProperties.FactMemory facts = properties.facts();
         return new Agent(client, new DefaultInputPolicy(100), new DefaultOutputPolicy(0),
                 new NoOpJudge(), new TokenUsageTracker(),
                 new InMemoryConversationStore(maxMessages), planner,
                 new HistoryCompressor(client, new BpeTokenCounter(), "summarizer",
                         compression.keepRecentMessages(), compression.compressEvery(),
                         compression.maxSummaryTokens()),
+                new FactExtractor(client, facts.model(), facts.maxFacts(), facts.maxTokens(),
+                        facts.reasoningEffort()),
                 overhead, properties);
     }
 
     private ContextPlanner planner(int window, OverflowPolicy policy) {
-        return new ContextPlanner(new BpeTokenCounter(), overhead, Map.of(), window, policy, 0.8);
+        return new ContextPlanner(new BpeTokenCounter(), overhead, Map.of(), window, policy, 0.8, 0);
     }
 
     @Test
@@ -349,7 +354,7 @@ class AgentTest {
         Agent compressing = compressingAgent();
         threeTurns(compressing);
         compressing.handle("c1", "what is my name?",
-                AgentConfig.builder().compressHistory(false).build());
+                AgentConfig.builder().contextStrategy(ContextStrategy.SLIDING_WINDOW).build());
 
         assertThat(client.summarizations).isZero();
         assertThat(client.last.messages()).extracting(Message::content).contains("my name is Nur");
@@ -379,8 +384,64 @@ class AgentTest {
         assertThat(compressing.transcript("c1")).isEmpty();
     }
 
+    @Test
+    void factsAreMaintainedOnEveryTurnAndNotJustEveryNth() {
+        // This is the whole cost difference between the two tabs: the summarizer fires once
+        // every few turns, the extractor fires on all of them.
+        threeTurns(factsAgent());
+
+        assertThat(client.extractions).isEqualTo(3);
+        assertThat(client.summarizations).isZero();
+    }
+
+    @Test
+    void theFactBlockIsSentAsSystemContextRatherThanAsSomethingSomebodySaid() {
+        Agent facts = factsAgent();
+        threeTurns(facts);
+
+        assertThat(facts.facts("c1").isPresent()).isTrue();
+        Message block = client.last.messages().stream()
+                .filter(m -> "system".equals(m.role()) && m.content().contains("fact3: value 3"))
+                .findFirst().orElseThrow();
+        assertThat(block.content()).contains("current and authoritative");
+    }
+
+    @Test
+    void theOtherTabsNeverPayForAnExtractionTheyWouldNotRead() {
+        threeTurns(agent);
+        threeTurns(compressingAgent());
+
+        assertThat(client.extractions).isZero();
+    }
+
+    @Test
+    void anExtractorOutageCostsOneStaleTurnButNotTheAnswer() {
+        Agent facts = factsAgent();
+        client.failExtraction = true;
+        AgentResult result = facts.handle("c1", "my name is Nur", null);
+
+        assertThat(result.answer()).isNotBlank();
+        assertThat(facts.facts("c1").isPresent()).isFalse();
+    }
+
+    @Test
+    void resettingForgetsTheFactsAndNotJustTheMessages() {
+        Agent facts = factsAgent();
+        threeTurns(facts);
+        facts.reset("c1");
+
+        assertThat(facts.facts("c1").isPresent()).isFalse();
+        assertThat(facts.transcript("c1")).isEmpty();
+    }
+
+    private Agent factsAgent() {
+        return newAgent(20, planner(131_072, OverflowPolicy.FAIL),
+                properties(ContextStrategy.STICKY_FACTS));
+    }
+
     private Agent compressingAgent() {
-        return newAgent(20, planner(131_072, OverflowPolicy.FAIL), properties(true));
+        return newAgent(20, planner(131_072, OverflowPolicy.FAIL),
+                properties(ContextStrategy.SUMMARY));
     }
 
     /** Enough turns to put four messages behind the two-message verbatim tail. */
@@ -407,16 +468,18 @@ class AgentTest {
     }
 
     /** Keep the last 2 messages verbatim and fold once 4 more have piled up behind them. */
-    private static AgentProperties properties(boolean compress) {
+    private static AgentProperties properties(ContextStrategy strategy) {
         return new AgentProperties("test-key", "https://example.invalid",
                 Duration.ofSeconds(1), Duration.ofSeconds(1), List.of("openai/gpt-oss-20b"),
                 List.of("", "low", "medium", "high"),
                 new AgentProperties.Defaults("openai/gpt-oss-20b", "be brief", 1.0, 256,
                         "", List.of(), ""),
                 new AgentProperties.Limit(100), new AgentProperties.Limit(0),
-                new AgentProperties.Memory(20, "memory", ""),
+                new AgentProperties.Memory(20, "memory", "", ""),
                 new AgentProperties.Context(Map.of(), 131_072, OverflowPolicy.FAIL, 0.8),
-                new AgentProperties.Compression(compress, 2, 4, "summarizer", 120, "low"));
+                new AgentProperties.Strategy(strategy, 0),
+                new AgentProperties.Compression(2, 4, "summarizer", 120, "low"),
+                new AgentProperties.FactMemory("extractor", 12, 600, "low"));
     }
 
     /**
@@ -425,17 +488,31 @@ class AgentTest {
      */
     private static final class ScriptedClient implements LlmClient {
         private static final String SUMMARIZER = "summarizer";
+        private static final String EXTRACTOR = "extractor";
 
         private ChatRequest last;
         private ChatRequest lastSummarization;
+        private ChatRequest lastExtraction;
         private int summarizations;
+        private int extractions;
         private boolean failNext;
         private boolean failSummarization;
+        private boolean failExtraction;
         private String finishReason = "stop";
         private int calls;
 
         @Override
         public ChatResponse complete(ChatRequest request) {
+            if (EXTRACTOR.equals(request.model())) {
+                lastExtraction = request;
+                extractions++;
+                if (failExtraction) {
+                    throw new LlmException("extractor unavailable");
+                }
+                // A fresh key every call, so each turn genuinely moves the block on.
+                return new ChatResponse("fact" + extractions + ": value " + extractions,
+                        request.model(), "stop", new TokenUsage(40, 20, 60));
+            }
             if (SUMMARIZER.equals(request.model())) {
                 lastSummarization = request;
                 summarizations++;

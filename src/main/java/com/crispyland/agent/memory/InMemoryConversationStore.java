@@ -12,6 +12,7 @@ public class InMemoryConversationStore implements ConversationStore {
 
     private final Map<String, List<Message>> conversations = new ConcurrentHashMap<>();
     private final Map<String, Summary> summaries = new ConcurrentHashMap<>();
+    private final Map<String, Facts> facts = new ConcurrentHashMap<>();
     private final int maxMessages;
 
     /** @param maxMessages rolling window size; {@code <= 0} keeps everything */
@@ -46,8 +47,30 @@ public class InMemoryConversationStore implements ConversationStore {
     }
 
     @Override
+    public Facts facts(String conversationId) {
+        return facts.getOrDefault(conversationId, Facts.EMPTY);
+    }
+
+    @Override
+    public void saveFacts(String conversationId, Facts updated) {
+        facts.put(conversationId, updated);
+    }
+
+    @Override
+    public int copy(String fromConversationId, String toConversationId, int messages) {
+        List<Message> source = history(fromConversationId);
+        List<Message> copied = Conversations.head(source, messages);
+        conversations.put(toConversationId, copied);
+        summaries.put(toConversationId, summary(fromConversationId));
+        facts.put(toConversationId, (copied.size() == source.size())
+                ? facts(fromConversationId) : Facts.EMPTY);
+        return copied.size();
+    }
+
+    @Override
     public void clear(String conversationId) {
         conversations.remove(conversationId);
         summaries.remove(conversationId);
+        facts.remove(conversationId);
     }
 }

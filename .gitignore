@@ -40,3 +40,5 @@ build/
 
 ### Mac OS ###
 .DS_Store
+### Claude Code local settings — regenerated from approved commands, can capture secrets
+.claude/settings.local.json

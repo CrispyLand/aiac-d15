@@ -39,13 +39,31 @@ public class ConversationIdResolver {
         }
 
         String minted = UUID.randomUUID().toString();
-        Cookie cookie = new Cookie(COOKIE_NAME, minted);
+        response.addCookie(cookie(minted));
+        return minted;
+    }
+
+    /**
+     * Issues a brand-new identity, so the caller comes back as a stranger.
+     * <p>
+     * This is the last step of forgetting someone, never the first. Rotate before the stored data
+     * is deleted and the delete misses — it would go looking under the new id — leaving a record
+     * that still holds everything the visitor asked to have removed and no longer has any id
+     * pointing at it. Unreachable is not deleted; it is deleted's worst impersonation.
+     */
+    public String rotate(HttpServletResponse response) {
+        String minted = UUID.randomUUID().toString();
+        response.addCookie(cookie(minted));
+        return minted;
+    }
+
+    private static Cookie cookie(String value) {
+        Cookie cookie = new Cookie(COOKIE_NAME, value);
         cookie.setPath("/");
         cookie.setMaxAge(THIRTY_DAYS_IN_SECONDS);
         cookie.setHttpOnly(true);
         cookie.setAttribute("SameSite", "Lax");
-        response.addCookie(cookie);
-        return minted;
+        return cookie;
     }
 
     /**

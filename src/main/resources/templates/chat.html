@@ -95,24 +95,36 @@
                                     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                                     font-size: 12px; padding-right: 12px; }
 
-        /* Still stored, still on screen, but outside the window the strategy is willing to send. */
-        .turn.out { opacity: .4; }
-        .out .who::after { content: ' · not sent'; color: #e8590c; font-weight: 600; }
-
-        /* Strategy tabs — the three answers to "the dialogue no longer fits". */
-        .tabs { display: flex; gap: 8px; margin-bottom: 18px; }
-        .tab {
-            flex: 1; display: block; text-decoration: none; padding: 12px 14px;
-            background: #eceef1; border: 1px solid var(--line); border-radius: 9px;
+        /* The three memory layers, side by side. Not tabs: they are all on at once, so nothing
+           here is clickable and nothing is ever in an "off" state. */
+        .layers { display: flex; gap: 8px; margin-bottom: 18px; }
+        .layer {
+            flex: 1; padding: 12px 14px; background: var(--card);
+            border: 1px solid var(--line); border-radius: 9px;
             color: var(--muted); font-size: 12px; line-height: 1.4;
         }
-        .tab:hover { background: #e4e7eb; }
-        .tab b { display: block; font-size: 14px; color: #40454d; margin-bottom: 3px; }
-        .tab.on { background: var(--card); border-color: var(--accent); color: var(--ink);
-                  box-shadow: inset 0 3px 0 var(--accent); }
-        .tab.on b { color: var(--accent); }
-        /* Branches sit under the tabs because they are not a fourth tab: they compose with all
-           three. Whatever strategy is selected, it runs inside whichever branch is open. */
+        .layer b { color: #40454d; }
+        .layer > b { display: block; font-size: 14px; margin-bottom: 3px; }
+        .layer .scope { display: block; margin-top: 6px; font-size: 11px; opacity: .8; }
+        .layer.short-term { box-shadow: inset 0 3px 0 #1c7ed6; }
+        .layer.working    { box-shadow: inset 0 3px 0 #2f9e44; }
+        .layer.long-term  { box-shadow: inset 0 3px 0 #ae3ec9; }
+        /* The long-term layer, itemised. Purple throughout, matching its band in the budget bar
+           and its card above, so the same colour always means the same lifetime. */
+        .ltm { border-top: 3px solid #ae3ec9; margin-bottom: 18px; }
+        .ltmhead { display: flex; align-items: center; justify-content: space-between;
+                   gap: 12px; font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+        .ltmhead b { color: #862e9c; font-size: 14px; }
+        .ltmgroup { margin-top: 10px; }
+        .ltmkind { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+        .ltmkind b { color: #862e9c; font-size: 12px; text-transform: uppercase;
+                     letter-spacing: .04em; margin-right: 6px; }
+        .ltmdrop { width: 60px; text-align: right; }
+        .danger { background: transparent; border: 1px solid #e8b4b4; color: #c92a2a;
+                  border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: 600; }
+        .danger:hover { background: #fff0f0; border-color: #c92a2a; }
+        /* Branches sit under the layers because they cut across them: a fork copies short-term
+           and working memory, and shares long-term with every other branch. */
         .branches { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
                     margin: -8px 0 18px; font-size: 12px; color: var(--muted); }
         .bchip { background: #eceef1; border: 1px solid var(--line); border-radius: 999px;
@@ -125,6 +137,18 @@
         .fork { background: transparent; border: 1px solid var(--line); color: var(--muted);
                 border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
         .fork:hover { border-color: #ae3ec9; color: #862e9c; }
+        /* The task boundary. Green, matching working memory everywhere else on the page, because
+           these two buttons are the only things that end it. */
+        .task { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                margin: -8px 0 18px; font-size: 12px; color: var(--muted); }
+        .task .held { background: #ebfbee; border: 1px solid #b2e7c0; border-radius: 999px;
+                      padding: 5px 12px; color: #2b8a3e; font-weight: 600; }
+        .keep { background: transparent; border: 1px solid #b2e7c0; color: #2b8a3e;
+                border-radius: 6px; padding: 5px 12px; font-size: 12px; font-weight: 600; }
+        .keep:hover { background: #ebfbee; border-color: #2f9e44; }
+        .keep[disabled] { opacity: .45; cursor: default; }
+        .agreed { color: #2b8a3e; font-weight: 700; font-size: 10px;
+                  letter-spacing: .04em; text-transform: uppercase; }
         .turnhead .fork { visibility: hidden; }
         .turn:hover .fork { visibility: visible; }
 
@@ -143,7 +167,8 @@
         .seg { height: 100%; }
         .seg.sys { background: #7048e8; }
         .seg.sum { background: #0ca678; }
-        .seg.facts { background: #ae3ec9; }
+        .seg.lt { background: #ae3ec9; }
+        .seg.facts { background: #2f9e44; }
         .seg.hist { background: #3b5bdb; }
         .seg.input { background: #22b8cf; }
         .seg.tmpl { background: #f76707; }
@@ -185,19 +210,49 @@
     <h1>Agent Chat</h1>
     <div class="sub">Spring Boot &rarr; <code>com.crispyland.agent</code> &rarr; Groq chat completions</div>
 
-    <!-- Three answers to the same problem. Plain links, not JavaScript: a tab is a URL, so it
-         survives a reload, a back button and a paste into a bug report. The conversation itself
-         is untouched by the switch — only how it is packed into the next prompt changes. -->
-    <div class="tabs">
-        <a th:each="s : ${strategies}" class="tab" th:classappend="${s == strategy} ? 'on'"
-           th:href="@{/(strategy=${s.id})}">
-            <b th:text="${s.label}">Sliding window</b>
-            <span th:text="${s.tagline}"></span>
-        </a>
+    <!-- The memory model, stated on the page rather than buried in the code. These are not modes
+         to pick between — all three are live at once, and what separates them is how long each
+         one outlives the turn that wrote it. -->
+    <div class="layers">
+        <div th:each="l : ${layers}" class="layer" th:classappend="${l.id}">
+            <b th:text="${l.label}">Short-term</b>
+            <span th:text="${l.tagline}"></span>
+            <span class="scope">scope: <b th:text="${l.scope}"></b> · lives
+                <b th:text="${l.lifetime}"></b></span>
+        </div>
     </div>
 
-    <!-- Which line of the conversation is open. Not a fourth tab: a branch is the same dialogue
-         under a different storage key, so the strategy above still decides how it is packed. -->
+    <!-- The contents of the long-term layer, itemised. The other two layers are visible as the
+         transcript and the block above it; this one has no such rendering of its own, and a layer
+         that keeps things about a person while being invisible to them is not a feature. Every
+         entry is one click from being deleted, including all of them at once. -->
+    <div class="card ltm" th:if="${longTerm != null and longTerm.present}">
+        <div class="ltmhead">
+            <span><b>Long-term memory</b> · <span th:text="${longTerm.size}">0</span> entries
+                · rev <span th:text="${longTerm.revision}">0</span>
+                · survives reset, survives every branch</span>
+            <button type="submit" form="forgetAllForm" class="danger">Forget me</button>
+        </div>
+        <!-- th:if is evaluated before th:with, so the guard cannot lean on `held`. -->
+        <div th:each="k : ${longTermKinds}" th:if="${!longTerm.of(k).isEmpty()}"
+             th:with="held=${longTerm.of(k)}" class="ltmgroup" th:classappend="${k.id}">
+            <span class="ltmkind"><b th:text="${k.label}">Profile</b>
+                <span th:text="${k.tagline}"></span></span>
+            <table class="facttable">
+                <tr th:each="e : ${held}">
+                    <td th:text="${e.key}">name</td>
+                    <td th:text="${e.value}">Nur</td>
+                    <td class="ltmdrop">
+                        <button type="submit" form="forgetForm" name="entry" th:value="${e.id}"
+                                class="fork" title="Forget just this one.">forget</button>
+                    </td>
+                </tr>
+            </table>
+        </div>
+    </div>
+
+    <!-- Which line of the conversation is open. A branch is the same dialogue under a different
+         storage key, so short-term and working memory fork with it; long-term does not. -->
     <div class="branches">
         <span>branch</span>
         <button th:each="b : ${branches}" type="submit" form="switchForm" name="branch"
@@ -214,12 +269,28 @@
         </button>
     </div>
 
+    <!-- The task boundary, made explicit. The agent could be asked "is this task over?" every
+         turn, but that answer decides whether a decision gets written where every branch can see
+         it, and a wrong guess there is neither visible nor undone by the next message. Two
+         buttons, and the difference between them is the whole point: one keeps what was agreed,
+         the other throws the task away entirely. -->
+    <div class="task">
+        <span>task</span>
+        <span class="held" th:text="${facts.size} + ' held · ' + ${#lists.size(facts.settled)} + ' agreed'">
+            0 held · 0 agreed</span>
+        <button type="submit" form="finishTaskForm" class="keep" th:disabled="${!facts.present}"
+                th:title="${#lists.isEmpty(facts.settled)}
+                    ? 'Nothing is marked agreed yet, so this would only clear the scratch.'
+                    : 'Move the agreed lines into long-term memory and clear the rest.'">
+            Finish task &amp; keep what was agreed
+        </button>
+        <button type="submit" form="newTaskForm" class="ghost" th:disabled="${!facts.present}"
+                title="Throw working memory away without promoting any of it. The dialogue and what is known about you are untouched.">
+            New task
+        </button>
+    </div>
+
     <form method="post" action="/">
-
-        <!-- Carries the open tab through the POST. The tabs are GET links, the send is a POST,
-             and without this the answer would come back under whichever strategy is the default. -->
-        <input type="hidden" name="contextStrategy" th:value="${form.contextStrategy}"/>
-
 
         <!-- 1. Parameters -->
         <div class="card">
@@ -294,27 +365,31 @@
 
             <!-- Pinned at the top of the stream rather than inline, because unlike the summary
                  it does not stand in for any particular messages — it stands in for all of them. -->
-            <div class="turn facts" th:if="${strategy.name() == 'STICKY_FACTS' and facts != null and facts.present}">
+            <div class="turn facts" th:if="${facts != null and facts.present}">
                 <div class="turnhead">
-                    <span class="who">facts · rev <span th:text="${facts.revision}">0</span></span>
+                    <span class="who">working · rev <span th:text="${facts.revision}">0</span></span>
                     <span class="mstats">
                         <b th:text="${facts.size}">0</b> of <b th:text="${maxFacts}">12</b> slots
                         · cost <b th:text="${#numbers.formatInteger(facts.buildTokens, 1, 'COMMA')}">0</b>
                         tok to maintain
                     </span>
                 </div>
+                <!-- The mark is not decoration. An agreed line is what survives the task closing;
+                     everything else here is scratch and is thrown away at that point, so which is
+                     which has to be legible before the button is pressed rather than after. -->
                 <table class="facttable">
                     <tr th:each="f : ${facts.entries}">
                         <td th:text="${f.key}">database</td>
                         <td th:text="${f.value}">Postgres 16</td>
+                        <td class="ltmdrop"><span class="agreed" th:if="${f.settled}"
+                                title="Agreed. Moves to long-term memory when the task is finished.">agreed</span></td>
                     </tr>
                 </table>
             </div>
 
             <!-- Stands exactly where the messages it replaced used to be: this is the whole
                  conversation, it is just that the head of it is no longer made of messages. -->
-            <div class="turn summary"
-                 th:if="${strategy.name() == 'SUMMARY' and summary != null and summary.present}">
+            <div class="turn summary" th:if="${summary != null and summary.present}">
                 <div class="turnhead">
                     <span class="who">summary · rev <span th:text="${summary.revision}">0</span></span>
                     <span class="mstats">
@@ -328,11 +403,11 @@
                 <div class="body" th:text="${summary.text}"></div>
             </div>
 
-            <!-- Greyed out rather than hidden: the difference between "the agent has forgotten
-                 this" and "this never happened" is the whole lesson of the sliding window. -->
+            <!-- Everything still on screen is still in the prompt. Nothing is greyed out any
+                 more, because nothing is dropped at read time: a message that leaves short-term
+                 memory leaves the transcript, folded into the notes above. -->
             <div th:each="m, it : ${transcript}" class="turn"
-                 th:classappend="(${m.user} ? 'user' : 'assistant')
-                                 + (${budget != null and it.index < budget.windowedMessages} ? ' out' : '')">
+                 th:classappend="${m.user} ? 'user' : 'assistant'">
                 <div class="turnhead">
                     <span class="who" th:text="${m.user} ? 'you' : 'agent'"></span>
                     <!-- A checkpoint at this message: everything above it is carried over, and
@@ -371,9 +446,12 @@
             </div>
 
             <div class="track">
+                <!-- Segment order follows the prompt's own layer order, so the bar reads as a
+                     picture of the request rather than as an arbitrary stack. -->
                 <span class="seg sys" th:style="'width:' + ${budget.systemPercent} + '%'"></span>
+                <span class="seg lt" th:style="'width:' + ${budget.longTermPercent} + '%'"></span>
+                <span class="seg facts" th:style="'width:' + ${budget.workingPercent} + '%'"></span>
                 <span class="seg sum" th:style="'width:' + ${budget.summaryPercent} + '%'"></span>
-                <span class="seg facts" th:style="'width:' + ${budget.factsPercent} + '%'"></span>
                 <span class="seg hist" th:style="'width:' + ${budget.historyPercent} + '%'"></span>
                 <span class="seg input" th:style="'width:' + ${budget.inputPercent} + '%'"></span>
                 <span class="seg tmpl" th:style="'width:' + ${budget.overheadPercent} + '%'"></span>
@@ -384,10 +462,12 @@
             <div class="key">
                 <span><i style="background:#7048e8"></i>system prompt
                       <b th:text="${#numbers.formatInteger(budget.systemTokens, 1, 'COMMA')}">0</b></span>
+                <span th:if="${budget.hasLongTerm}"><i style="background:#ae3ec9"></i>long-term
+                      <b th:text="${#numbers.formatInteger(budget.longTermTokens, 1, 'COMMA')}">0</b></span>
+                <span th:if="${budget.hasWorking}"><i style="background:#2f9e44"></i>working
+                      <b th:text="${#numbers.formatInteger(budget.workingTokens, 1, 'COMMA')}">0</b></span>
                 <span th:if="${budget.compressed}"><i style="background:#0ca678"></i>summary
                       <b th:text="${#numbers.formatInteger(budget.summaryTokens, 1, 'COMMA')}">0</b></span>
-                <span th:if="${budget.hasFacts}"><i style="background:#ae3ec9"></i>facts
-                      <b th:text="${#numbers.formatInteger(budget.factsTokens, 1, 'COMMA')}">0</b></span>
                 <span><i style="background:#3b5bdb"></i>history
                       <b th:text="${#numbers.formatInteger(budget.historyTokens, 1, 'COMMA')}">0</b></span>
                 <span th:if="${budget.inputTokens > 0}"><i style="background:#22b8cf"></i>new message
@@ -425,16 +505,6 @@
                             ${budget.savedPercent} + '%)'">0</b>
                 on this call and on every call after it.
             </div>
-            <!-- Not a failure: this is the strategy doing exactly what it says it does. The
-                 messages are still on disk and still on screen, greyed out — the model simply
-                 never sees them, which is why this tab costs nothing extra and forgets absolutely. -->
-            <div class="note info" th:if="${budget.windowed}">
-                <b th:text="${strategy.label}">Sliding window</b> is sending the last
-                <b th:text="${windowMessages}">6</b> messages.
-                <b th:text="${budget.windowedMessages}">0</b> older message(s) are still stored but
-                are not in this prompt — anything agreed in them is, as far as the model is
-                concerned, gone.
-            </div>
             <div class="note info" th:if="${budget.trimmed}">
                 Trim policy dropped the
                 <b th:text="${budget.droppedMessages}">0</b> oldest message(s) to make this call fit —
@@ -463,16 +533,15 @@
     <!-- Sibling forms: HTML forbids nesting, so buttons inside the main form target these by id.
          The submitting button carries the interesting value (which branch, which message), which
          is why one form each is enough for all of them. -->
-    <form id="resetForm" method="post" action="/reset">
-        <!-- Come back to the tab you were on, not to the default one. -->
-        <input type="hidden" name="strategy" th:value="${form.contextStrategy}"/>
-    </form>
-    <form id="switchForm" method="post" action="/branch/switch">
-        <input type="hidden" name="strategy" th:value="${form.contextStrategy}"/>
-    </form>
-    <form id="forkForm" method="post" action="/branch/fork">
-        <input type="hidden" name="strategy" th:value="${form.contextStrategy}"/>
-    </form>
+    <form id="resetForm" method="post" action="/reset"></form>
+    <form id="switchForm" method="post" action="/branch/switch"></form>
+    <form id="forkForm" method="post" action="/branch/fork"></form>
+    <form id="finishTaskForm" method="post" action="/task/finish"></form>
+    <form id="newTaskForm" method="post" action="/task/new"
+          onsubmit="return confirm('Discard working memory, including anything agreed? The dialogue and long-term memory stay.');"></form>
+    <form id="forgetForm" method="post" action="/memory/forget"></form>
+    <form id="forgetAllForm" method="post" action="/memory/forget-all"
+          onsubmit="return confirm('Delete everything remembered about you, every branch, and the id itself? This cannot be undone.');"></form>
 
     <div class="card error" th:if="${error}">
         <h2>Something went wrong</h2>

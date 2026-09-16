@@ -6,12 +6,15 @@ import com.crispyland.agent.llm.GroqLlmClient;
 import com.crispyland.agent.llm.LlmClient;
 import com.crispyland.agent.memory.BranchStore;
 import com.crispyland.agent.memory.ConversationStore;
-import com.crispyland.agent.memory.FactExtractor;
+import com.crispyland.agent.memory.MemoryExtractor;
 import com.crispyland.agent.memory.HistoryCompressor;
 import com.crispyland.agent.memory.InMemoryBranchStore;
 import com.crispyland.agent.memory.InMemoryConversationStore;
+import com.crispyland.agent.memory.InMemoryLongTermStore;
 import com.crispyland.agent.memory.JsonFileBranchStore;
 import com.crispyland.agent.memory.JsonFileConversationStore;
+import com.crispyland.agent.memory.JsonFileLongTermStore;
+import com.crispyland.agent.memory.LongTermStore;
 import com.crispyland.agent.policy.DefaultInputPolicy;
 import com.crispyland.agent.policy.DefaultOutputPolicy;
 import com.crispyland.agent.policy.InputPolicy;
@@ -89,8 +92,7 @@ public class AgentConfiguration {
                                          AgentProperties properties) {
         AgentProperties.Context context = properties.context();
         return new ContextPlanner(tokenCounter, templateOverhead, context.windows(),
-                context.defaultWindow(), context.overflowPolicy(), context.warnAt(),
-                properties.windowMessages());
+                context.defaultWindow(), context.overflowPolicy(), context.warnAt());
     }
 
     /**
@@ -114,15 +116,19 @@ public class AgentConfiguration {
      * Also an ordinary call through the same client — and unlike the summarizer it runs on
      * every single turn, which is the cost that makes this strategy different rather than the
      * size of the block it produces.
+     * <p>
+     * One extractor feeds both the working and the long-term layer, so {@code max-facts} bounds
+     * the lines it may return as well as the working block it fills. A separate ceiling for the
+     * reply would only ever be the smaller of the two in practice.
      */
     @Bean
     @ConditionalOnMissingBean
-    public FactExtractor factExtractor(LlmClient llmClient, AgentProperties properties) {
+    public MemoryExtractor memoryExtractor(LlmClient llmClient, AgentProperties properties) {
         AgentProperties.FactMemory facts = properties.facts();
         String model = (facts.model() == null || facts.model().isBlank())
                 ? properties.defaults().model()
                 : facts.model();
-        return new FactExtractor(llmClient, model, facts.maxFacts(), facts.maxTokens(),
+        return new MemoryExtractor(llmClient, model, facts.maxFacts(), facts.maxTokens(),
                 facts.reasoningEffort());
     }
 
@@ -138,6 +144,22 @@ public class AgentConfiguration {
                     Path.of(memory.file()), memory.maxMessages());
         }
         return new InMemoryConversationStore(memory.maxMessages());
+    }
+
+    /**
+     * Long-term memory follows the same {@code memory.store} switch as the transcripts, but into
+     * its own file. One switch because "does this deployment write to disk at all" is a single
+     * question; two files because the answer to "when is this thrown away" is not.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public LongTermStore longTermStore(AgentProperties properties) {
+        AgentProperties.LongTerm longTerm = properties.longTerm();
+        if (AgentProperties.Memory.JSON.equalsIgnoreCase(properties.memory().store())) {
+            return new JsonFileLongTermStore(JsonMapper.builder().build(),
+                    Path.of(longTerm.file()), longTerm.maxEntries());
+        }
+        return new InMemoryLongTermStore(longTerm.maxEntries());
     }
 
     /** Refs follow the transcripts: persisted together, forgotten together. */

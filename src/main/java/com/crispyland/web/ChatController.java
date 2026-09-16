@@ -7,7 +7,10 @@ import com.crispyland.agent.AgentProperties;
 import com.crispyland.agent.AgentResult;
 import com.crispyland.agent.Branches;
 import com.crispyland.agent.ContextOverflowException;
-import com.crispyland.agent.ContextStrategy;
+import com.crispyland.agent.memory.LongTermKind;
+import com.crispyland.agent.memory.LongTermStore;
+import com.crispyland.agent.memory.MemoryLayer;
+import com.crispyland.agent.memory.MemoryScope;
 import com.crispyland.agent.memory.Message;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -32,34 +35,27 @@ public class ChatController {
     private final AgentProperties properties;
     private final ConversationIdResolver conversationIds;
     private final Branches branches;
+    private final LongTermStore longTerm;
 
     public ChatController(Agent agent, AgentProperties properties,
-                          ConversationIdResolver conversationIds, Branches branches) {
+                          ConversationIdResolver conversationIds, Branches branches,
+                          LongTermStore longTerm) {
         this.agent = agent;
         this.properties = properties;
         this.conversationIds = conversationIds;
         this.branches = branches;
+        this.longTerm = longTerm;
     }
 
-    /**
-     * @param strategy which tab is open. It lives in the URL rather than in the session so a
-     *                 tab is a link — shareable, back-button-able, and reloadable into the same
-     *                 view of the same conversation.
-     */
     @GetMapping("/")
-    public String chatPage(@RequestParam(required = false) String strategy, Model model,
-                           HttpServletRequest request, HttpServletResponse response) {
+    public String chatPage(Model model, HttpServletRequest request, HttpServletResponse response) {
         // Resolving here also mints the cookie for a first-time visitor, before they send anything.
-        String visitor = conversationIds.resolve(request, response);
-        String conversationId = branches.activeKey(visitor);
-        addBranches(model, visitor);
-        AgentConfig config = properties.defaultConfig().toBuilder()
-                .contextStrategy(ContextStrategy.from(strategy))
-                .build()
-                .withFallback(properties.defaultConfig());
+        MemoryScope scope = scope(request, response);
+        addBranches(model, scope.visitor());
+        AgentConfig config = properties.defaultConfig();
         model.addAttribute("form", ChatForm.of("", config));
-        addTranscript(model, conversationId, agent.transcript(conversationId));
-        model.addAttribute("budget", agent.budget(conversationId, config));
+        addMemory(model, scope, agent.transcript(scope.conversation()));
+        model.addAttribute("budget", agent.budget(scope, config));
         addOptions(model, config);
         return "chat";
     }
@@ -67,46 +63,104 @@ public class ChatController {
     @PostMapping("/")
     public String ask(@ModelAttribute("form") ChatForm form, BindingResult binding, Model model,
                       HttpServletRequest request, HttpServletResponse response) {
-        String visitor = conversationIds.resolve(request, response);
-        String conversationId = branches.activeKey(visitor);
-        addBranches(model, visitor);
+        MemoryScope scope = scope(request, response);
+        addBranches(model, scope.visitor());
         addOptions(model, form.toAgentConfig().withFallback(properties.defaultConfig()));
 
         if (binding.hasErrors()) {
             model.addAttribute("error", "Some parameters could not be read — check the numeric fields.");
-            addTranscript(model, conversationId, agent.transcript(conversationId));
-            model.addAttribute("budget", agent.budget(conversationId, properties.defaultConfig()));
+            addMemory(model, scope, agent.transcript(scope.conversation()));
+            model.addAttribute("budget", agent.budget(scope, properties.defaultConfig()));
             return "chat";
         }
 
         try {
-            AgentResult result = agent.handle(conversationId, form.userInput(), form.toAgentConfig());
+            AgentResult result = agent.handle(scope, form.userInput(), form.toAgentConfig());
             model.addAttribute("result", result);
-            addTranscript(model, conversationId, result.transcript());
-            model.addAttribute("budget", agent.budget(conversationId, result.effectiveConfig()));
+            addMemory(model, scope, result.transcript());
+            model.addAttribute("budget", agent.budget(scope, result.effectiveConfig()));
             // Keep the settings the agent actually used, but clear the box for the next turn.
             model.addAttribute("form", ChatForm.of("", result.effectiveConfig()));
         } catch (ContextOverflowException e) {
             // Show the budget that caused the refusal, not the one the dialogue merely sits at.
             model.addAttribute("error", e.getMessage());
             model.addAttribute("budget", e.budget());
-            addTranscript(model, conversationId, agent.transcript(conversationId));
+            addMemory(model, scope, agent.transcript(scope.conversation()));
         } catch (AgentException e) {
             model.addAttribute("error", e.getMessage());
-            addTranscript(model, conversationId, agent.transcript(conversationId));
-            model.addAttribute("budget", agent.budget(conversationId, form.toAgentConfig()));
+            addMemory(model, scope, agent.transcript(scope.conversation()));
+            model.addAttribute("budget", agent.budget(scope, form.toAgentConfig()));
         }
         return "chat";
     }
 
-    /** Discards the messages but keeps the cookie — same visitor, fresh dialogue, same tab. */
+    /**
+     * Discards the messages but keeps the cookie — same visitor, fresh dialogue.
+     * <p>
+     * Long-term memory is deliberately untouched. That is the observable difference between the
+     * layers: reset and the agent still greets you by name, because the name was never part of
+     * this conversation in the first place.
+     */
     @PostMapping("/reset")
-    public String reset(@RequestParam(required = false) String strategy,
-                        HttpServletRequest request, HttpServletResponse response) {
+    public String reset(HttpServletRequest request, HttpServletResponse response) {
         // Every branch, not just the open one: a half-reset conversation with forks still
         // hanging off the transcript it no longer has is worse than either outcome.
         branches.reset(conversationIds.resolve(request, response));
-        return redirect(strategy);
+        return "redirect:/";
+    }
+
+    /** Drops one long-term entry by its id, leaving the rest of the layer alone. */
+    @PostMapping("/memory/forget")
+    public String forget(@RequestParam String entry,
+                         HttpServletRequest request, HttpServletResponse response) {
+        longTerm.forget(conversationIds.resolve(request, response), entry);
+        return "redirect:/";
+    }
+
+    /**
+     * Erases the visitor: everything remembered about them, every branch they opened, and then
+     * the id itself.
+     * <p>
+     * The order is the point and it is not interchangeable. Delete the data first while the id
+     * still addresses it, and rotate last — rotate first and the deletes go looking under an id
+     * that owns nothing, leaving the real record intact and permanently unreachable. That outcome
+     * is worse than having no button, because it looks like the button worked.
+     */
+    @PostMapping("/memory/forget-all")
+    public String forgetAll(HttpServletRequest request, HttpServletResponse response) {
+        String visitor = conversationIds.resolve(request, response);
+        longTerm.forgetAll(visitor);
+        branches.reset(visitor);
+        conversationIds.rotate(response);
+        return "redirect:/";
+    }
+
+    /**
+     * Ends the task in hand and keeps what it agreed: every line working memory had marked
+     * {@code [agreed]} moves to long-term, and the rest of the block is discarded.
+     * <p>
+     * A button rather than something the model infers. The agent could be asked "is this task
+     * over?" on every turn, but the answer decides whether a decision is written somewhere every
+     * branch can see, and a wrong guess there is not visible and not undone by the next message.
+     * Asking the person who actually knows costs one click.
+     */
+    @PostMapping("/task/finish")
+    public String finishTask(HttpServletRequest request, HttpServletResponse response) {
+        agent.finishTask(scope(request, response));
+        return "redirect:/";
+    }
+
+    /**
+     * Starts a fresh task, discarding working memory without promoting any of it.
+     * <p>
+     * The other half of the boundary, and it has to exist: a task that went nowhere must be able
+     * to end without writing its dead ends into permanent memory. Without this the only way to
+     * abandon an exploration is to also keep what it concluded.
+     */
+    @PostMapping("/task/new")
+    public String newTask(HttpServletRequest request, HttpServletResponse response) {
+        agent.newTask(scope(request, response));
+        return "redirect:/";
     }
 
     /**
@@ -115,27 +169,26 @@ public class ChatController {
      * futures of one past, comparable because everything before the split is identical.
      */
     @PostMapping("/branch/fork")
-    public String fork(@RequestParam(required = false) String strategy,
-                       @RequestParam(required = false) String name,
+    public String fork(@RequestParam(required = false) String name,
                        @RequestParam(required = false, defaultValue = "-1") int at,
                        HttpServletRequest request, HttpServletResponse response) {
         branches.fork(conversationIds.resolve(request, response), name, at);
-        return redirect(strategy);
+        return "redirect:/";
     }
 
     /** Switching is free and lossless — the other branch's messages were never touched. */
     @PostMapping("/branch/switch")
-    public String switchBranch(@RequestParam(required = false) String strategy,
-                               @RequestParam(required = false) String branch,
+    public String switchBranch(@RequestParam(required = false) String branch,
                                HttpServletRequest request, HttpServletResponse response) {
         branches.switchTo(conversationIds.resolve(request, response), branch);
-        return redirect(strategy);
+        return "redirect:/";
     }
 
-    /** Post/redirect/get, keeping whichever tab was open. */
-    private static String redirect(String strategy) {
-        ContextStrategy open = ContextStrategy.from(strategy);
-        return (open == null) ? "redirect:/" : "redirect:/?strategy=" + open.id();
+    /** Who is asking and which of their branches is open — resolved once per request. */
+    private MemoryScope scope(HttpServletRequest request, HttpServletResponse response) {
+        // Resolving here also mints the cookie for a first-time visitor, before they send anything.
+        String visitor = conversationIds.resolve(request, response);
+        return new MemoryScope(visitor, branches.activeKey(visitor));
     }
 
     private void addBranches(Model model, String visitor) {
@@ -143,23 +196,28 @@ public class ChatController {
         model.addAttribute("branch", branches.active(visitor));
     }
 
-    /** The turn-by-turn cost series is only ever a view over the transcript — never stored twice. */
-    private void addTranscript(Model model, String conversationId, List<Message> transcript) {
+    /**
+     * Every layer on the page, so the claim that they are separate is something the user can see
+     * rather than something the code asserts. The turn-by-turn cost series is only ever a view
+     * over the transcript — never stored twice.
+     */
+    private void addMemory(Model model, MemoryScope scope, List<Message> transcript) {
         model.addAttribute("transcript", transcript);
         model.addAttribute("turns", TurnCost.series(transcript));
         // The head of the dialogue that no longer exists as messages — rendered above them so
         // the page shows the whole conversation, compressed part included.
-        model.addAttribute("summary", agent.summary(conversationId));
-        model.addAttribute("facts", agent.facts(conversationId));
+        model.addAttribute("summary", agent.summary(scope.conversation()));
+        model.addAttribute("facts", agent.facts(scope.conversation()));
+        model.addAttribute("longTerm", agent.recall(scope.visitor()));
     }
 
     /** Dropdown contents come from application.yml, not from the template. */
     private void addOptions(Model model, AgentConfig config) {
         model.addAttribute("models", properties.availableModels());
         model.addAttribute("reasoningEfforts", properties.reasoningEfforts());
-        model.addAttribute("strategies", ContextStrategy.values());
-        model.addAttribute("strategy", config.contextStrategyOrDefault());
-        model.addAttribute("windowMessages", properties.windowMessages());
+        model.addAttribute("layers", MemoryLayer.values());
+        model.addAttribute("longTermKinds", LongTermKind.values());
+        model.addAttribute("keepRecentMessages", properties.keepRecentMessages());
         model.addAttribute("maxFacts", properties.facts().maxFacts());
     }
 }

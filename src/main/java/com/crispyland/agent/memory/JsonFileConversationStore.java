@@ -214,13 +214,17 @@ public class JsonFileConversationStore implements ConversationStore {
             ObjectNode entry = array.addObject();
             entry.put("key", fact.key());
             entry.put("value", fact.value());
+            // Written even when false: this flag decides whether the line is kept forever or
+            // dropped when the task closes, and defaulting it on read is the wrong way to lose.
+            entry.put("settled", fact.settled());
         }
     }
 
     private static Facts readFacts(JsonNode node) {
         List<Facts.Fact> entries = new ArrayList<>();
         for (JsonNode entry : node.path("entries")) {
-            entries.add(new Facts.Fact(text(entry.path("key")), text(entry.path("value"))));
+            entries.add(new Facts.Fact(text(entry.path("key")), text(entry.path("value")),
+                    flag(entry.path("settled"))));
         }
         return new Facts(entries, (int) number(node.path("revision")), number(node.path("buildTokens")));
     }
@@ -260,5 +264,18 @@ public class JsonFileConversationStore implements ConversationStore {
 
     private static long number(JsonNode node) {
         return node.isNumber() ? node.longValue() : 0L;
+    }
+
+    /**
+     * Absent reads as false, which is the safe direction: a line written before the flag existed
+     * was scratch, and the cost of getting it wrong is that it is dropped when the task closes
+     * rather than promoted into permanent memory on nobody's authority.
+     * <p>
+     * Guarded rather than trusted because {@code booleanValue()} throws on a missing node, and a
+     * throw here is not a lost flag — it is caught upstream as "corrupt file" and costs the whole
+     * dialogue. One field added to the format must never be able to erase the history.
+     */
+    private static boolean flag(JsonNode node) {
+        return node.isBoolean() && node.booleanValue();
     }
 }

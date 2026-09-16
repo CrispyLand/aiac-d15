@@ -26,12 +26,23 @@ public record Facts(List<Fact> entries, int revision, long buildTokens) {
 
     public static final Facts EMPTY = new Facts(List.of(), 0, 0L);
 
-    /** One remembered thing. */
-    public record Fact(String key, String value) {
+    /**
+     * One remembered thing, and whether it is still scratch or has been settled.
+     *
+     * @param settled true for a line the extractor tagged {@code decision} — kept here rather
+     *                than in long-term while the task is open, and promoted out of here when the
+     *                task closes. Everything else is scratch and is discarded at that point.
+     */
+    public record Fact(String key, String value, boolean settled) {
 
         public Fact {
             key = (key == null) ? "" : key.strip();
             value = (value == null) ? "" : value.strip();
+        }
+
+        /** Ordinary task scratch — the common case, and what most callers mean. */
+        public Fact(String key, String value) {
+            this(key, value, false);
         }
 
         public boolean isPresent() {
@@ -51,16 +62,26 @@ public record Facts(List<Fact> entries, int revision, long buildTokens) {
         return entries.size();
     }
 
-    /** The block as it is sent to the model: one {@code key: value} per line. */
+    /**
+     * The block as it is sent to the model: one {@code key: value} per line, with settled lines
+     * marked. The mark is not decoration — it is the difference between "this is where we are"
+     * and "this is agreed", and a model that cannot tell them apart reopens closed questions.
+     */
     public String render() {
         StringBuilder text = new StringBuilder();
         for (Fact fact : entries) {
             if (!text.isEmpty()) {
                 text.append('\n');
             }
-            text.append("- ").append(fact.key()).append(": ").append(fact.value());
+            text.append("- ").append(fact.settled() ? "[agreed] " : "")
+                    .append(fact.key()).append(": ").append(fact.value());
         }
         return text.toString();
+    }
+
+    /** The settled lines, in order — what a closing task hands to long-term memory. */
+    public List<Fact> settled() {
+        return entries.stream().filter(Fact::settled).toList();
     }
 
     /**
@@ -81,6 +102,19 @@ public record Facts(List<Fact> entries, int revision, long buildTokens) {
      * @param maxFacts ceiling on the block; {@code <= 0} for none. Updates to keys already in the
      *                 block are always applied — the cap refuses new subjects, never corrections.
      */
+    /**
+     * Adds what an extraction cost without pretending the block moved.
+     * <p>
+     * The one call per turn now feeds working <em>and</em> long-term memory, so a turn that only
+     * taught the agent something about the person still has to be paid for somewhere, and this is
+     * the layer carrying the running total. Billing it through {@link #updatedWith} instead would
+     * advance the revision counter on turns where nothing here changed, and that counter is the
+     * only cheap signal that working memory is actually being maintained.
+     */
+    public Facts billed(long costTokens) {
+        return (costTokens <= 0) ? this : new Facts(entries, revision, buildTokens + costTokens);
+    }
+
     public Facts updatedWith(List<Fact> changes, int maxFacts, long costTokens) {
         Map<String, Fact> merged = new LinkedHashMap<>();
         for (Fact fact : entries) {

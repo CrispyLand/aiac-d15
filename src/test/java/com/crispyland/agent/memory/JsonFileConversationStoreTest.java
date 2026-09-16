@@ -116,6 +116,26 @@ class JsonFileConversationStoreTest {
     }
 
     @Test
+    void aFileWrittenBeforeFactsHadASettledFlagStillLoads() throws IOException {
+        // Adding one field to the format must never be able to erase a history that predates it.
+        // Absent reads as false, which is the safe direction: an unmarked line is scratch, so the
+        // worst case is that it is dropped at the task boundary rather than promoted to permanent
+        // memory on nobody's authority.
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, """
+                {"conversations":{"c1":{
+                  "facts":{"revision":1,"buildTokens":60,
+                           "entries":[{"key":"database","value":"Postgres 16"}]},
+                  "messages":[{"role":"user","content":"hello"}]}}}""");
+
+        JsonFileConversationStore restored = store(20);
+
+        assertThat(restored.facts("c1").entries())
+                .containsExactly(new Facts.Fact("database", "Postgres 16", false));
+        assertThat(restored.history("c1")).hasSize(1);
+    }
+
+    @Test
     void aMissingFileIsSimplyAnEmptyDialogue() {
         assertThat(store(20).history("c1")).isEmpty();
         assertThat(file).doesNotExist();

@@ -23,30 +23,22 @@ public record AgentProperties(
         Limit outputPolicy,
         Memory memory,
         Context context,
-        Strategy strategy,
         Compression compression,
-        FactMemory facts) {
+        FactMemory facts,
+        LongTerm longTerm) {
+
+    /** The starting point for every turn: the declared per-request defaults. */
+    public AgentConfig defaultConfig() {
+        return defaults.toConfig();
+    }
 
     /**
-     * The starting point for every turn: the declared defaults, plus the context strategy the
-     * page opens on. The strategy is overridable per request — that is the whole point of the
-     * tabs — so it has to arrive in the same merge as everything else.
+     * How many messages stay verbatim in short-term memory. One number, not two: the buffer
+     * bound and the fold trigger are the same boundary seen from either side, and when they were
+     * separate knobs a message could fall out of the window without ever being folded.
      */
-    public AgentConfig defaultConfig() {
-        return defaults.toConfig().toBuilder()
-                .contextStrategy(initialStrategy())
-                .build();
-    }
-
-    public ContextStrategy initialStrategy() {
-        if (strategy == null || strategy.initial() == null) {
-            return ContextStrategy.SLIDING_WINDOW;
-        }
-        return strategy.initial();
-    }
-
-    public int windowMessages() {
-        return (strategy == null) ? 0 : strategy.windowMessages();
+    public int keepRecentMessages() {
+        return (compression == null) ? 0 : compression.keepRecentMessages();
     }
 
     /** Per-request parameter defaults used whenever the caller does not supply a value. */
@@ -91,6 +83,20 @@ public record AgentProperties(
     }
 
     /**
+     * What is kept about a visitor once every conversation they had is gone.
+     *
+     * @param file       path to the long-term JSON, used only when {@code memory.store} is
+     *                   {@code json}. Its own file, not a section of the conversation file: the
+     *                   whole claim of this layer is that it is not tied to a conversation's
+     *                   lifetime, and sharing storage is how that claim quietly stops being true
+     * @param maxEntries ceiling per visitor. Unlike the other layers this one has no natural end —
+     *                   nothing resets it and nobody is watching it grow — so the cap is the only
+     *                   thing standing between a returning visitor and a prompt that starts large
+     */
+    public record LongTerm(String file, int maxEntries) {
+    }
+
+    /**
      * The second window: the dialogue bounded in tokens rather than in messages.
      *
      * @param windows        context window per model id; a model absent here uses {@code defaultWindow}
@@ -104,32 +110,6 @@ public record AgentProperties(
                           double warnAt) {
     }
 
-    /**
-     * How the prompt is packed, and how much of the transcript the message-window strategies
-     * are willing to send.
-     *
-     * @param initial        which tab the page opens on
-     * @param windowMessages tail sent verbatim under {@code sliding-window} and {@code sticky-facts}.
-     *                       Ignored by {@code summary}, which folds the transcript in the store
-     *                       instead of cutting it at read time
-     */
-    public record Strategy(ContextStrategy initial, int windowMessages) {
-    }
-
-    /**
-     * History compression: the third answer to a growing prompt, after the message window and
-     * the token window — rewrite the old turns instead of dropping them.
-     *
-     * @param keepRecentMessages tail always sent verbatim, never summarized
-     * @param compressEvery      minimum backlog beyond the tail before a summarization is worth
-     *                           the call it costs
-     * @param model              which model writes the notes; a cheap one is usually right
-     * @param maxSummaryTokens   ceiling on the notes, and therefore on this part of every prompt.
-     *                           On a reasoning model the hidden reasoning tokens are billed
-     *                           against this same ceiling, so it has to cover both
-     * @param reasoningEffort    {@code ""} omits the parameter; on gpt-oss, {@code low} leaves
-     *                           most of {@code maxSummaryTokens} for the notes themselves
-     */
     /**
      * The key/value memory. Where compression pays once every N turns for a large rewrite, this
      * pays a small amount on <em>every</em> turn — so the two have very different cost curves
@@ -148,6 +128,21 @@ public record AgentProperties(
                              String reasoningEffort) {
     }
 
+    /**
+     * How short-term memory stays bounded: keep the newest {@code keepRecentMessages} verbatim
+     * and rewrite everything that falls out of that tail into the summary.
+     *
+     * @param keepRecentMessages tail always sent verbatim, never summarized
+     * @param compressEvery      minimum backlog beyond the tail before a summarization is worth
+     *                           the call it costs. Messages past the tail but short of this are
+     *                           still sent — the backlog is deferred, never silently dropped
+     * @param model              which model writes the notes; a cheap one is usually right
+     * @param maxSummaryTokens   ceiling on the notes, and therefore on this part of every prompt.
+     *                           On a reasoning model the hidden reasoning tokens are billed
+     *                           against this same ceiling, so it has to cover both
+     * @param reasoningEffort    {@code ""} omits the parameter; on gpt-oss, {@code low} leaves
+     *                           most of {@code maxSummaryTokens} for the notes themselves
+     */
     public record Compression(int keepRecentMessages,
                               int compressEvery,
                               String model,

@@ -12,9 +12,11 @@ import java.util.Objects;
  * {@code withFallback}, one line in the yml defaults.
  * <p>
  * Not all of it is sent to the provider: {@code maxCompletionTokens} doubles as the slice of
- * the window reserved for the reply, and {@code contextStrategy} never leaves the process at
- * all — it decides how the context is assembled, which is what makes it worth having on the
- * page as a switch you can flip between two otherwise identical turns.
+ * the window reserved for the reply.
+ * <p>
+ * Nothing here decides <em>how</em> memory is assembled any more. That used to be a per-request
+ * switch; it is now a property of the agent, because the memory layers have different lifetimes
+ * and a value that arrives with a single request cannot sensibly govern state that outlives it.
  */
 public record AgentConfig(
         String model,
@@ -23,8 +25,7 @@ public record AgentConfig(
         Integer maxCompletionTokens,
         String reasoningEffort,
         List<String> stopSequences,
-        String responseSchema,
-        ContextStrategy contextStrategy) {
+        String responseSchema) {
 
     public AgentConfig {
         stopSequences = (stopSequences == null) ? null : List.copyOf(stopSequences);
@@ -42,8 +43,7 @@ public record AgentConfig(
                 .maxCompletionTokens(maxCompletionTokens)
                 .reasoningEffort(reasoningEffort)
                 .stopSequences(stopSequences)
-                .responseSchema(responseSchema)
-                .contextStrategy(contextStrategy);
+                .responseSchema(responseSchema);
     }
 
     /**
@@ -59,27 +59,7 @@ public record AgentConfig(
                 maxCompletionTokens != null ? maxCompletionTokens : defaults.maxCompletionTokens(),
                 text(reasoningEffort, defaults.reasoningEffort()),
                 stopSequences != null ? stopSequences : defaults.stopSequences(),
-                text(responseSchema, defaults.responseSchema()),
-                contextStrategy != null ? contextStrategy : defaults.contextStrategy());
-    }
-
-    /** Never null after the defaults have been merged in; falls back to the safest strategy. */
-    public ContextStrategy contextStrategyOrDefault() {
-        return (contextStrategy == null) ? ContextStrategy.SLIDING_WINDOW : contextStrategy;
-    }
-
-    /**
-     * Whether this turn should fold its backlog into notes. Derived rather than configured:
-     * the summary is only maintained while it is the strategy being used, so that switching
-     * tabs does not quietly keep paying for a rewrite nothing is reading.
-     */
-    public boolean compressHistoryEnabled() {
-        return contextStrategyOrDefault() == ContextStrategy.SUMMARY;
-    }
-
-    /** Same reasoning for the fact block: extracted only while the facts strategy is active. */
-    public boolean stickyFactsEnabled() {
-        return contextStrategyOrDefault() == ContextStrategy.STICKY_FACTS;
+                text(responseSchema, defaults.responseSchema()));
     }
 
     public List<String> stopSequencesOrEmpty() {
@@ -106,7 +86,6 @@ public record AgentConfig(
         private String reasoningEffort;
         private List<String> stopSequences;
         private String responseSchema;
-        private ContextStrategy contextStrategy;
 
         public Builder model(String model) {
             this.model = model;
@@ -143,14 +122,9 @@ public record AgentConfig(
             return this;
         }
 
-        public Builder contextStrategy(ContextStrategy contextStrategy) {
-            this.contextStrategy = contextStrategy;
-            return this;
-        }
-
         public AgentConfig build() {
             return new AgentConfig(model, systemPrompt, temperature, maxCompletionTokens,
-                    reasoningEffort, stopSequences, responseSchema, contextStrategy);
+                    reasoningEffort, stopSequences, responseSchema);
         }
     }
 }

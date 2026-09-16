@@ -33,11 +33,6 @@ agent:
     # Keep the demo dialogue off the real transcript file.
     file: ./data/conversations-demo.json
 
-  strategy:
-    # Two turns of verbatim tail, so the sliding window is visibly throwing things away after
-    # four or five messages rather than after twenty.
-    window-messages: 4
-
   compression:
     # Fire after two turns instead of five, so the fold is visible on camera without typing
     # twenty messages first. Same trade-off, just reached sooner.

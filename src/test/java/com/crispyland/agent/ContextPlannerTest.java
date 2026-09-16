@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.crispyland.agent.memory.Facts;
+import com.crispyland.agent.memory.LongTermKind;
+import com.crispyland.agent.memory.LongTermMemory;
+import com.crispyland.agent.memory.MemoryLayer;
 import com.crispyland.agent.memory.MemoryState;
 import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.memory.Summary;
@@ -18,25 +21,15 @@ import org.junit.jupiter.api.Test;
 
 class ContextPlannerTest {
 
-    /** SUMMARY replays the whole retained transcript, which is the baseline the pricing tests want. */
     private static final AgentConfig CONFIG = AgentConfig.builder()
             .model("openai/gpt-oss-20b")
             .systemPrompt("be brief")
             .maxCompletionTokens(100)
-            .contextStrategy(ContextStrategy.SUMMARY)
             .build();
 
-    private static AgentConfig using(ContextStrategy strategy) {
-        return CONFIG.toBuilder().contextStrategy(strategy).build();
-    }
-
     private static ContextPlanner planner(int window, OverflowPolicy policy) {
-        return planner(window, policy, 4);
-    }
-
-    private static ContextPlanner planner(int window, OverflowPolicy policy, int windowMessages) {
         return new ContextPlanner(new BpeTokenCounter(), new TemplateOverhead(), Map.of(),
-                window, policy, 0.8, windowMessages);
+                window, policy, 0.8);
     }
 
     @Test
@@ -54,7 +47,7 @@ class ContextPlannerTest {
     void theProvidersTemplateCostIsLearnedFromTheFirstResponse() {
         TemplateOverhead overhead = new TemplateOverhead();
         ContextPlanner planner = new ContextPlanner(new BpeTokenCounter(), overhead, Map.of(),
-                1000, OverflowPolicy.OFF, 0.8, 4);
+                1000, OverflowPolicy.OFF, 0.8);
 
         ContextBudget first = planner.plan(CONFIG, MemoryState.EMPTY, "hello").budget();
         assertThat(first.calibrated()).isFalse();
@@ -96,8 +89,7 @@ class ContextPlannerTest {
         // A prompt that fits on its own but leaves no room for the answer is still a failure —
         // this is the arithmetic a message-counted window cannot see.
         ContextBudget budget = planner(1000, OverflowPolicy.OFF)
-                .plan(AgentConfig.builder().model("m").maxCompletionTokens(995)
-                                .contextStrategy(ContextStrategy.SUMMARY).build(),
+                .plan(AgentConfig.builder().model("m").maxCompletionTokens(995).build(),
                         MemoryState.EMPTY, "hello").budget();
 
         assertThat(budget.promptTokens()).isLessThan(1000);
@@ -107,7 +99,7 @@ class ContextPlannerTest {
     @Test
     void aPerModelWindowOverridesTheDefault() {
         ContextPlanner planner = new ContextPlanner(new BpeTokenCounter(), new TemplateOverhead(),
-                Map.of("openai/gpt-oss-20b", 8192), 131_072, OverflowPolicy.OFF, 0.8, 4);
+                Map.of("openai/gpt-oss-20b", 8192), 131_072, OverflowPolicy.OFF, 0.8);
 
         assertThat(planner.budget(CONFIG, MemoryState.EMPTY).contextWindow()).isEqualTo(8192);
         assertThat(planner.budget(AgentConfig.builder().model("unlisted").build(), MemoryState.EMPTY)
@@ -117,7 +109,7 @@ class ContextPlannerTest {
     @Test
     void warningFiresBeforeOverflowNotAtIt() {
         ContextPlanner planner = new ContextPlanner(new BpeTokenCounter(), new TemplateOverhead(),
-                Map.of(), 130, OverflowPolicy.OFF, 0.8, 4);
+                Map.of(), 130, OverflowPolicy.OFF, 0.8);
 
         ContextBudget budget = planner.plan(CONFIG, MemoryState.EMPTY, "hello").budget();
 
@@ -205,91 +197,103 @@ class ContextPlannerTest {
     }
 
     @Test
-    void theSlidingWindowSendsOnlyTheTailAndSaysHowMuchItLeftOut() {
-        ContextPlanner.ContextPlan plan = planner(1000, OverflowPolicy.FAIL, 4)
-                .plan(using(ContextStrategy.SLIDING_WINDOW), MemoryState.of(history(10)), "hello");
+    void theRetainedTranscriptIsReplayedWholeBecauseNothingIsCutAtReadTime() {
+        // There used to be a second, read-time window here on top of the compressor's. Two
+        // boundaries meant a message could be outside the window yet not yet folded — remembered
+        // by neither, and nothing said so. Short-term memory is now bounded only where it is
+        // written, so whatever the store still holds is exactly what the model sees.
+        ContextPlanner.ContextPlan plan = planner(1000, OverflowPolicy.FAIL)
+                .plan(CONFIG, MemoryState.of(history(10)), "hello");
 
-        // system + 4 replayed + the new message. Nothing stands in for the other six.
-        assertThat(plan.messages()).hasSize(6);
+        assertThat(plan.messages()).hasSize(12);
         assertThat(plan.messages()).extracting(Message::content)
-                .containsSequence("user 6", "assistant 7", "user 8", "assistant 9");
-        assertThat(plan.budget().windowedMessages()).isEqualTo(6);
-        assertThat(plan.budget().windowed()).isTrue();
-        // Left out is not the same as trimmed: nothing overflowed, this is the plan working.
+                .containsSequence("user 0", "assistant 1")
+                .containsSequence("user 8", "assistant 9");
         assertThat(plan.budget().trimmed()).isFalse();
     }
 
     @Test
-    void theWindowNeverOpensOnAnAssistantReply() {
-        // A window of 5 would start at index 5 — "assistant 5" — so it gives one up to start
-        // on "user 6" instead. A replay beginning mid-turn reads as though the agent spoke first.
-        ContextPlanner.ContextPlan plan = planner(1000, OverflowPolicy.FAIL, 5)
-                .plan(using(ContextStrategy.SLIDING_WINDOW), MemoryState.of(history(10)), "hello");
-
-        assertThat(plan.messages().get(1).content()).isEqualTo("user 6");
-        assertThat(plan.budget().windowedMessages()).isEqualTo(6);
-    }
-
-    @Test
-    void theSummaryStrategyIgnoresTheWindowBecauseItsStoreIsAlreadyFolded() {
-        ContextPlanner.ContextPlan plan = planner(1000, OverflowPolicy.FAIL, 4)
-                .plan(CONFIG, MemoryState.of(history(10)), "hello");
-
-        assertThat(plan.messages()).hasSize(12);
-        assertThat(plan.budget().windowedMessages()).isZero();
-    }
-
-    @Test
-    void factsAreSentAheadOfTheWindowedTailAndPricedOnTheirOwn() {
-        Facts facts = Facts.EMPTY.updatedWith(List.of(
+    void workingMemoryIsSentAheadOfTheTranscriptAndPricedOnItsOwn() {
+        Facts working = Facts.EMPTY.updatedWith(List.of(
                 new Facts.Fact("database", "Postgres 16"),
                 new Facts.Fact("deadline", "end of Q3")), 12, 90);
 
-        ContextPlanner.ContextPlan plan = planner(1000, OverflowPolicy.FAIL, 4)
-                .plan(using(ContextStrategy.STICKY_FACTS), new MemoryState(Summary.EMPTY, facts, history(10)),
-                        "hello");
+        ContextPlanner.ContextPlan plan = planner(1000, OverflowPolicy.FAIL)
+                .plan(CONFIG, MemoryState.of(working, history(4)), "hello");
 
         assertThat(plan.messages()).extracting(Message::role)
                 .containsExactly("system", "system", "user", "assistant", "user", "assistant", "user");
         assertThat(plan.messages().get(1).content()).contains("database: Postgres 16");
-        assertThat(plan.budget().factsTokens()).isPositive();
+        assertThat(plan.budget().workingTokens()).isPositive();
         assertThat(plan.budget().summaryTokens()).isZero();
         assertThat(plan.budget().promptTokens()).isEqualTo(plan.budget().systemTokens()
-                + plan.budget().factsTokens() + plan.budget().historyTokens()
+                + plan.budget().workingTokens() + plan.budget().historyTokens()
                 + plan.budget().inputTokens() + plan.budget().overheadTokens());
     }
 
     @Test
-    void aStrategyOnlyReadsItsOwnMemoryEvenWhenBothArePresent() {
-        // The store may hold notes from a previous stint on the Summary tab. Reading them from
-        // the Facts tab would make the two tabs incomparable — and would charge twice for the
-        // same past. Each tab sees exactly the memory it maintains.
-        MemoryState both = new MemoryState(
+    void everyLayerPresentIsSentAndPricedSeparately() {
+        // The layers are not alternatives. Holding all three means all three are in the prompt,
+        // each with its own line in the budget — which is what makes "where did that answer come
+        // from?" a question with an answer.
+        MemoryState all = new MemoryState(
+                LongTermMemory.EMPTY.updatedWith(List.of(
+                        new LongTermMemory.Entry(LongTermKind.PROFILE, "name", "Nur")), 24),
                 Summary.EMPTY.rewrittenAs("they argued about databases", 8, 400, 60),
                 Facts.EMPTY.updatedWith(List.of(new Facts.Fact("database", "Postgres 16")), 12, 90),
                 history(2));
 
-        ContextBudget asFacts = planner(1000, OverflowPolicy.FAIL)
-                .plan(using(ContextStrategy.STICKY_FACTS), both, "hello").budget();
-        assertThat(asFacts.summaryTokens()).isZero();
-        assertThat(asFacts.replacedTokens()).isZero();
-        assertThat(asFacts.factsTokens()).isPositive();
+        ContextPlanner.ContextPlan plan = planner(2000, OverflowPolicy.FAIL).plan(CONFIG, all, "hello");
+        ContextBudget budget = plan.budget();
 
-        ContextBudget asWindow = planner(1000, OverflowPolicy.FAIL)
-                .plan(using(ContextStrategy.SLIDING_WINDOW), both, "hello").budget();
-        assertThat(asWindow.summaryTokens()).isZero();
-        assertThat(asWindow.factsTokens()).isZero();
+        // Most durable first, and working memory before the notes: the block outranks the
+        // transcript it summarizes, and both outrank a profile written weeks ago.
+        assertThat(plan.messages().get(1).content()).contains("name: Nur");
+        assertThat(plan.messages().get(2).content()).contains("database: Postgres 16");
+        assertThat(plan.messages().get(3).content()).contains("they argued about databases");
+        assertThat(budget.longTermTokens()).isPositive();
+        assertThat(budget.workingTokens()).isPositive();
+        assertThat(budget.summaryTokens()).isPositive();
+        assertThat(budget.replacedTokens()).isEqualTo(400);
+        assertThat(budget.memoryTokens()).isEqualTo(budget.longTermTokens()
+                + budget.workingTokens() + budget.summaryTokens() + budget.historyTokens());
+        // The breakdown accounts for the whole prompt. A total that does not match its own parts
+        // sends the reader looking for the saving in the wrong layer.
+        assertThat(budget.promptTokens()).isEqualTo(budget.systemTokens()
+                + budget.memoryTokens() + budget.inputTokens() + budget.overheadTokens());
     }
 
     @Test
-    void anIdIsWhatTheTabsRoundTripThroughAndGarbageFallsBackToTheDefault() {
-        assertThat(ContextStrategy.SLIDING_WINDOW.id()).isEqualTo("sliding-window");
-        assertThat(ContextStrategy.from("sliding-window")).isEqualTo(ContextStrategy.SLIDING_WINDOW);
-        assertThat(ContextStrategy.from("STICKY_FACTS")).isEqualTo(ContextStrategy.STICKY_FACTS);
-        assertThat(ContextStrategy.from("  summary ")).isEqualTo(ContextStrategy.SUMMARY);
-        // Null rather than a throw: a hand-edited query string must not be able to 400 the page.
-        assertThat(ContextStrategy.from("nonsense")).isNull();
-        assertThat(ContextStrategy.from("")).isNull();
+    void longTermMemorySurvivesTheResetThatEmptiesTheOtherTwo() {
+        LongTermMemory known = LongTermMemory.EMPTY.updatedWith(List.of(
+                new LongTermMemory.Entry(LongTermKind.PROFILE, "name", "Nur"),
+                new LongTermMemory.Entry(LongTermKind.DECISION, "store", "Postgres 16")), 24);
+
+        // A reset leaves the visitor's layer intact and everything conversation-scoped empty —
+        // this is the state the very next prompt is built from.
+        ContextPlanner.ContextPlan plan = planner(2000, OverflowPolicy.FAIL)
+                .plan(CONFIG, MemoryState.of(known, List.of()), "hello");
+
+        assertThat(plan.messages()).extracting(Message::role)
+                .containsExactly("system", "system", "user");
+        // Grouped under headings, because the heading is what says how binding a line is:
+        // a decision must be built on, a profile line is background.
+        assertThat(plan.messages().get(1).content())
+                .contains("Profile (Who you are):")
+                .contains("Decisions (What was agreed):");
+        assertThat(plan.budget().historyTokens()).isZero();
+        assertThat(plan.budget().workingTokens()).isZero();
+        assertThat(plan.budget().longTermTokens()).isPositive();
+    }
+
+    @Test
+    void theLayersAreSeparatedByScopeAndLifetimeNotByWhatTheyHold() {
+        assertThat(MemoryLayer.SHORT_TERM.id()).isEqualTo("short-term");
+        assertThat(MemoryLayer.LONG_TERM.id()).isEqualTo("long-term");
+
+        // No two layers share both answers — that is what stops them collapsing into one store.
+        assertThat(MemoryLayer.values()).extracting(MemoryLayer::scope).doesNotHaveDuplicates();
+        assertThat(MemoryLayer.values()).extracting(MemoryLayer::lifetime).doesNotHaveDuplicates();
     }
 
     /** {@code count} messages alternating user/assistant, as a real transcript would be. */

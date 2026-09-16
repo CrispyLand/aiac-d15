@@ -67,6 +67,20 @@ agent:
     # a branch's messages live in the file above, under `<conversation-id>/<branch-id>`.
     branch-file: ./data/branches.json
 
+  # LONG-TERM MEMORY — what is kept about the visitor once every conversation above is gone.
+  #
+  # Keyed by visitor, not by conversation, which is what lets it survive a reset and what makes
+  # it the one layer that needs a delete button. Its own file for the same reason: `ls ./data`
+  # should show three lifetimes as three files, and clearing a conversation should not be one
+  # `clear()` bug away from clearing this.
+  long-term:
+    file: ./data/memory.json
+
+    # Ceiling per visitor. The other layers end on their own — a reset empties short-term, a
+    # closed task empties working — but nothing ever ends this one, so without a cap a regular
+    # visitor's prompt starts a little larger every week and nobody notices until it overflows.
+    max-entries: 24
+
   # The second window. max-messages above bounds the dialogue in messages; the model bills
   # and rejects in tokens, so the prompt is priced locally before every call.
   context:
@@ -89,28 +103,7 @@ agent:
     # Fraction of the window at which the page starts warning.
     warn-at: 0.80
 
-  # How the prompt is packed out of a conversation too long to send whole. The three tabs on
-  # the page are these three values; everything else in this file applies to all of them.
-  #
-  #   sliding-window  last N messages, nothing else. Free, and forgets absolutely.
-  #   sticky-facts    a key/value block of what has been decided, plus the last N messages.
-  #   summary         old turns rewritten into notes, tuned under `compression` below.
-  #
-  # Only the active strategy's memory is maintained, so switching tabs does not keep paying
-  # for a summary or an extraction that nothing is going to read.
-  strategy:
-    # Which tab the page opens on.
-    initial: sliding-window
-
-    # The verbatim tail for sliding-window and sticky-facts, counted in messages (1 turn = 2).
-    # Ignored by summary, which folds the transcript in the store rather than cutting it here —
-    # its own tail is compression.keep-recent-messages.
-    #
-    # These two strategies cut at *read* time and leave the stored transcript alone, which is
-    # what makes switching between them non-destructive. Summary is the odd one out: it deletes.
-    window-messages: 6
-
-  # The key/value memory behind the `sticky-facts` tab. Applies only while that tab is selected.
+  # WORKING MEMORY — the key/value block for the task in hand. Always maintained.
   #
   # Note the cost shape, because it is the real difference between this and compression:
   # summarization pays ~500 tokens once every fifth turn, this pays ~150-300 tokens on EVERY
@@ -136,10 +129,15 @@ agent:
     # ceiling available for the facts themselves.
     reasoning-effort: low
 
-  # The third answer to a growing prompt. max-messages and overflow-policy both shrink the
-  # context by forgetting; this one rewrites the old turns into notes and sends those instead,
-  # so the cost stops growing without the dialogue losing what happened.
-  # Applies only while `summary` is the selected strategy.
+  # SHORT-TERM MEMORY — how the dialogue stays bounded. max-messages and overflow-policy both
+  # shrink the context by forgetting; this rewrites the old turns into notes and sends those
+  # instead, so the cost stops growing without the dialogue losing what happened. Always on.
+  #
+  # keep-recent-messages is now the ONLY tail setting. There used to be a second one
+  # (strategy.window-messages) that cut the transcript at read time while this one folded it at
+  # write time. Two boundaries meant a message could fall outside the window without ever having
+  # been folded — covered by neither, and nothing said so. One number, one boundary:
+  # what falls out of the tail is exactly what gets summarized.
   compression:
     # The tail that is always sent verbatim. Recency is where pronouns, corrections and
     # "no, the other one" live, and a summary is a poor substitute for the last few turns.

@@ -1,7 +1,5 @@
 package com.crispyland.agent.usage;
 
-import com.crispyland.agent.ContextStrategy;
-
 /**
  * What the next call is about to cost, measured against the model's context window.
  * <p>
@@ -10,53 +8,57 @@ import com.crispyland.agent.ContextStrategy;
  * that fits with one token to spare leaves the model no room to reply, and the provider
  * rejects the call rather than truncating the input.
  * <p>
- * Six segments, which is exactly the breakdown the dialogue grows in:
+ * The breakdown is one line per memory layer, plus the three things that are not memory at all:
  * <ul>
- *   <li>{@code systemTokens} — fixed per turn, re-sent every single call</li>
- *   <li>{@code summaryTokens} — the compressed stand-in for the turns no longer sent; bounded,
- *       and the only reason {@code historyTokens} stops growing</li>
- *   <li>{@code factsTokens} — the key/value block, also bounded, also a stand-in for the past</li>
- *   <li>{@code historyTokens} — the part that grows; every retained turn is re-sent in full</li>
+ *   <li>{@code systemTokens} — the instruction, re-sent every single call</li>
+ *   <li>{@code longTermTokens} — what is known about the user; survives this conversation</li>
+ *   <li>{@code workingTokens} — the current task's block; dies with the task</li>
+ *   <li>{@code summaryTokens} — short-term, compressed: the stand-in for turns already folded away</li>
+ *   <li>{@code historyTokens} — short-term, verbatim: the part that grows turn by turn</li>
  *   <li>{@code inputTokens} — the new message, plus the request's framing overhead</li>
  *   <li>{@code overheadTokens} — the provider's own chat template, learned by observation</li>
  * </ul>
- * Which of those are non-zero is entirely a function of {@code strategy}, which is why it is
- * recorded here: a budget is only comparable to another budget if you know how it was packed.
+ * Splitting the memory lines by layer rather than reporting one "context" figure is what makes
+ * the model's behaviour attributable: when an answer recalls something, the layer it came from
+ * has a price attached to it, and a layer that costs tokens every turn and never changes an
+ * answer is visibly not paying for itself.
  *
- * @param strategy         how this prompt was assembled
- * @param droppedMessages  how many oldest messages the trim policy removed to make the call fit —
- *                         an overflow rescue, not a plan
- * @param windowedMessages how many the strategy's own window left out, which is not a failure but
- *                         the strategy working as intended
- * @param replacedTokens   what the compressed-away messages would still be adding to this prompt,
- *                         which is the only honest baseline to measure the saving against
- * @param calibrated       false until this model has been seen once and the overhead is real
+ * @param droppedMessages how many oldest messages the trim policy removed to make the call fit —
+ *                        an overflow rescue, not a plan
+ * @param replacedTokens  what the folded-away messages would still be adding to this prompt,
+ *                        which is the only honest baseline to measure the saving against
+ * @param calibrated      false until this model has been seen once and the overhead is real
  */
 public record ContextBudget(
         String model,
-        ContextStrategy strategy,
         long contextWindow,
         long systemTokens,
+        long longTermTokens,
+        long workingTokens,
         long summaryTokens,
-        long factsTokens,
         long historyTokens,
         long inputTokens,
         long overheadTokens,
         long reservedCompletionTokens,
         int droppedMessages,
-        int windowedMessages,
         long replacedTokens,
         boolean calibrated,
         double warnAt) {
 
     /** Estimated {@code prompt_tokens} for the request as it will be sent. */
     public long promptTokens() {
-        return systemTokens + summaryTokens + factsTokens + historyTokens + inputTokens + overheadTokens;
+        return countedTokens() + overheadTokens;
     }
 
     /** The messages alone, before the provider's template is added — what was actually encoded. */
     public long countedTokens() {
-        return systemTokens + summaryTokens + factsTokens + historyTokens + inputTokens;
+        return systemTokens + longTermTokens + workingTokens + summaryTokens
+                + historyTokens + inputTokens;
+    }
+
+    /** Everything the three memory layers cost on this one call. */
+    public long memoryTokens() {
+        return longTermTokens + workingTokens + summaryTokens + historyTokens;
     }
 
     public boolean compressed() {
@@ -120,13 +122,12 @@ public record ContextBudget(
         return droppedMessages > 0;
     }
 
-    /** True when the strategy is deliberately not sending part of the transcript it still holds. */
-    public boolean windowed() {
-        return windowedMessages > 0;
+    public boolean hasLongTerm() {
+        return longTermTokens > 0;
     }
 
-    public boolean hasFacts() {
-        return factsTokens > 0;
+    public boolean hasWorking() {
+        return workingTokens > 0;
     }
 
     /** Width of each segment as a percentage of the window, for rendering the bar. */
@@ -141,12 +142,16 @@ public record ContextBudget(
         return percentOfWindow(systemTokens);
     }
 
-    public int summaryPercent() {
-        return percentOfWindow(summaryTokens);
+    public int longTermPercent() {
+        return percentOfWindow(longTermTokens);
     }
 
-    public int factsPercent() {
-        return percentOfWindow(factsTokens);
+    public int workingPercent() {
+        return percentOfWindow(workingTokens);
+    }
+
+    public int summaryPercent() {
+        return percentOfWindow(summaryTokens);
     }
 
     public int historyPercent() {

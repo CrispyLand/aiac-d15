@@ -19,6 +19,10 @@ import com.crispyland.agent.memory.LongTermStore;
 import com.crispyland.agent.memory.MemoryExtractor;
 import com.crispyland.agent.memory.MemoryScope;
 import com.crispyland.agent.memory.Message;
+import com.crispyland.agent.profile.Lens;
+import com.crispyland.agent.profile.Limits;
+import com.crispyland.agent.profile.Persona;
+import com.crispyland.agent.profile.UserProfile;
 import com.crispyland.agent.policy.DefaultInputPolicy;
 import com.crispyland.agent.policy.DefaultOutputPolicy;
 import com.crispyland.agent.policy.PolicyViolationException;
@@ -38,6 +42,11 @@ class AgentTest {
 
     /** One visitor on their trunk branch, where the branch key is the visitor id. */
     private static final MemoryScope C1 = MemoryScope.of("c1");
+
+    /** A profile that sets both limits, so "declared beats default" is visible on the wire. */
+    private static final UserProfile RUSSELL = new UserProfile("russell", "Russell", "Russian",
+            "formal", new UserProfile.Format("short bullet points", 120), List.of("use emoji"),
+            new Limits(400, 0.2, null), null);
 
     private final ScriptedClient client = new ScriptedClient();
     private final TemplateOverhead overhead = new TemplateOverhead();
@@ -79,7 +88,7 @@ class AgentTest {
 
     @Test
     void unsetParametersFallBackToDefaults() {
-        AgentResult result = agent.handle(C1, "  hi  ", AgentConfig.builder().temperature(0.2).build());
+        AgentResult result = agent.handle(C1, Persona.NONE, "  hi  ", AgentConfig.builder().temperature(0.2).build());
 
         assertThat(client.last.model()).isEqualTo("openai/gpt-oss-20b");
         assertThat(client.last.temperature()).isEqualTo(0.2);
@@ -89,8 +98,8 @@ class AgentTest {
 
     @Test
     void priorTurnsAreReplayedToTheModel() {
-        agent.handle(C1, "my name is Nur", null);
-        agent.handle(C1, "what is my name?", null);
+        agent.handle(C1, Persona.NONE, "my name is Nur", null);
+        agent.handle(C1, Persona.NONE, "what is my name?", null);
 
         // Two system messages, not one: the prompt is the instruction, the block below it is
         // working memory. Gluing them together is what makes a model read state as a directive.
@@ -105,8 +114,8 @@ class AgentTest {
 
     @Test
     void conversationsAreIsolatedFromEachOther() {
-        agent.handle(MemoryScope.of("alice"), "hello from alice", null);
-        agent.handle(MemoryScope.of("bob"), "hello from bob", null);
+        agent.handle(MemoryScope.of("alice"), Persona.NONE, "hello from alice", null);
+        agent.handle(MemoryScope.of("bob"), Persona.NONE, "hello from bob", null);
 
         // Working memory is per conversation too — bob's block is his own, not a view of alice's.
         assertThat(client.last.messages()).extracting(Message::content)
@@ -119,8 +128,8 @@ class AgentTest {
     @Test
     void historyIsTrimmedToTheConfiguredWindow() {
         Agent windowed = newAgent(2);
-        windowed.handle(C1, "first", null);
-        windowed.handle(C1, "second", null);
+        windowed.handle(C1, Persona.NONE, "first", null);
+        windowed.handle(C1, Persona.NONE, "second", null);
 
         assertThat(windowed.transcript("c1"))
                 .extracting(Message::role, Message::content)
@@ -129,7 +138,7 @@ class AgentTest {
 
     @Test
     void eachStoredMessageCarriesItsShareOfTheTurn() {
-        agent.handle(C1, "hello", null);
+        agent.handle(C1, Persona.NONE, "hello", null);
         List<Message> transcript = agent.transcript("c1");
 
         // The user message owns the prompt tokens, the assistant message the completion.
@@ -143,8 +152,8 @@ class AgentTest {
 
     @Test
     void systemPromptIsNotStoredSoItCanBeChangedMidConversation() {
-        agent.handle(C1, "hello", null);
-        agent.handle(C1, "again", AgentConfig.builder().systemPrompt("be a pirate").build());
+        agent.handle(C1, Persona.NONE, "hello", null);
+        agent.handle(C1, Persona.NONE, "again", AgentConfig.builder().systemPrompt("be a pirate").build());
 
         assertThat(client.last.messages().get(0)).isEqualTo(Message.system("be a pirate"));
         assertThat(agent.transcript("c1")).noneMatch(m -> Message.SYSTEM.equals(m.role()));
@@ -152,12 +161,12 @@ class AgentTest {
 
     @Test
     void systemMessageIsRebuiltOnceAtPositionZeroEveryTurn() {
-        agent.handle(C1, "turn one", null);
+        agent.handle(C1, Persona.NONE, "turn one", null);
         printRoles(1);
-        agent.handle(C1, "turn two", null);
+        agent.handle(C1, Persona.NONE, "turn two", null);
         printRoles(2);
         // System prompt edited on the page mid-conversation.
-        agent.handle(C1, "turn three", AgentConfig.builder().systemPrompt("be a pirate").build());
+        agent.handle(C1, Persona.NONE, "turn three", AgentConfig.builder().systemPrompt("be a pirate").build());
         printRoles(3);
 
         List<Message> sent = client.last.messages();
@@ -178,7 +187,7 @@ class AgentTest {
 
     @Test
     void resetClearsTheDialogue() {
-        agent.handle(C1, "hello", null);
+        agent.handle(C1, Persona.NONE, "hello", null);
         agent.reset("c1");
 
         assertThat(agent.transcript("c1")).isEmpty();
@@ -186,10 +195,10 @@ class AgentTest {
 
     @Test
     void aFailedTurnDoesNotPoisonHistory() {
-        agent.handle(C1, "good turn", null);
+        agent.handle(C1, Persona.NONE, "good turn", null);
         client.failNext = true;
 
-        assertThatThrownBy(() -> agent.handle(C1, "doomed turn", null))
+        assertThatThrownBy(() -> agent.handle(C1, Persona.NONE, "doomed turn", null))
                 .isInstanceOf(LlmException.class);
         assertThat(agent.transcript("c1"))
                 .extracting(Message::role, Message::content)
@@ -198,8 +207,8 @@ class AgentTest {
 
     @Test
     void tokenUsageAccumulatesAcrossCalls() {
-        agent.handle(C1, "one", null);
-        AgentResult second = agent.handle(C1, "two", null);
+        agent.handle(C1, Persona.NONE, "one", null);
+        AgentResult second = agent.handle(C1, Persona.NONE, "two", null);
 
         assertThat(second.usage().totalTokens()).isEqualTo(15);
         assertThat(second.cumulativeUsage().totalTokens()).isEqualTo(30);
@@ -207,14 +216,14 @@ class AgentTest {
 
     @Test
     void blankInputNeverReachesTheModel() {
-        assertThatThrownBy(() -> agent.handle(C1, "   ", null))
+        assertThatThrownBy(() -> agent.handle(C1, Persona.NONE, "   ", null))
                 .isInstanceOf(PolicyViolationException.class);
         assertThat(client.last).isNull();
     }
 
     @Test
     void everyTurnReportsWhatItWasPredictedToCost() {
-        AgentResult result = agent.handle(C1, "hello", null);
+        AgentResult result = agent.handle(C1, Persona.NONE, "hello", null);
 
         // 256 reserved for the reply is the dominant term while the dialogue is still short —
         // the whole prompt is a rounding error next to the space held open for the answer.
@@ -227,9 +236,9 @@ class AgentTest {
 
     @Test
     void historyIsThePartOfTheBudgetThatGrows() {
-        long first = agent.handle(C1, "hello", null).budget().historyTokens();
-        long second = agent.handle(C1, "hello again", null).budget().historyTokens();
-        long third = agent.handle(C1, "and again", null).budget().historyTokens();
+        long first = agent.handle(C1, Persona.NONE, "hello", null).budget().historyTokens();
+        long second = agent.handle(C1, Persona.NONE, "hello again", null).budget().historyTokens();
+        long third = agent.handle(C1, Persona.NONE, "and again", null).budget().historyTokens();
 
         System.out.println("  history tokens by turn: " + first + " -> " + second + " -> " + third);
         assertThat(first).isZero();
@@ -242,7 +251,7 @@ class AgentTest {
         // 200-token window against 256 reserved for the reply: nothing can fit, ever.
         Agent tiny = newAgent(20, planner(200, OverflowPolicy.FAIL));
 
-        assertThatThrownBy(() -> tiny.handle(C1, "hello", null))
+        assertThatThrownBy(() -> tiny.handle(C1, Persona.NONE, "hello", null))
                 .isInstanceOf(ContextOverflowException.class)
                 .hasMessageContaining("Context window exceeded");
         // The point of a local guard: no request, no bill, no round trip.
@@ -253,7 +262,7 @@ class AgentTest {
     void withOverflowUnguardedTheRequestIsSentAnywayForTheProviderToReject() {
         Agent tiny = newAgent(20, planner(200, OverflowPolicy.OFF));
 
-        AgentResult result = tiny.handle(C1, "hello", null);
+        AgentResult result = tiny.handle(C1, Persona.NONE, "hello", null);
 
         assertThat(client.last).isNotNull();
         assertThat(result.budget().overflowing()).isTrue();
@@ -266,9 +275,9 @@ class AgentTest {
         // and roughly one turn. Trim can only reach the transcript — the layers above it are
         // fixed costs, which is exactly why they have to be priced separately from history.
         Agent tiny = newAgent(20, planner(340, OverflowPolicy.TRIM));
-        tiny.handle(C1, "the first thing I ever said in this conversation", null);
-        tiny.handle(C1, "the second thing I ever said in this conversation", null);
-        AgentResult third = tiny.handle(C1, "the third thing", null);
+        tiny.handle(C1, Persona.NONE, "the first thing I ever said in this conversation", null);
+        tiny.handle(C1, Persona.NONE, "the second thing I ever said in this conversation", null);
+        AgentResult third = tiny.handle(C1, Persona.NONE, "the third thing", null);
 
         assertThat(third.budget().trimmed()).isTrue();
         assertThat(third.budget().overflowing()).isFalse();
@@ -286,13 +295,13 @@ class AgentTest {
     void trimStillFailsWhenTheNewMessageAloneCannotFit() {
         Agent tiny = newAgent(20, planner(260, OverflowPolicy.TRIM));
 
-        assertThatThrownBy(() -> tiny.handle(C1, "hello", null))
+        assertThatThrownBy(() -> tiny.handle(C1, Persona.NONE, "hello", null))
                 .isInstanceOf(ContextOverflowException.class);
     }
 
     @Test
     void theEstimateIsHeldAgainstTheProvidersBillAndCorrectedByIt() {
-        AgentResult first = agent.handle(C1, "hello", null);
+        AgentResult first = agent.handle(C1, Persona.NONE, "hello", null);
 
         assertThat(first.promptTokenDrift())
                 .isEqualTo(first.budget().promptTokens() - first.usage().promptTokens());
@@ -301,14 +310,14 @@ class AgentTest {
 
         // From the second turn on, the gap between the local count and the provider's bill
         // has been observed and is folded into the estimate.
-        assertThat(agent.handle(C1, "hello again", null).budget().calibrated()).isTrue();
+        assertThat(agent.handle(C1, Persona.NONE, "hello again", null).budget().calibrated()).isTrue();
     }
 
     @Test
     void aReplyCutOffAtTheTokenLimitIsFlagged() {
         client.finishReason = "length";
 
-        assertThat(agent.handle(C1, "hello", null).truncated()).isTrue();
+        assertThat(agent.handle(C1, Persona.NONE, "hello", null).truncated()).isTrue();
     }
 
     // --- history compression -------------------------------------------------------------
@@ -424,7 +433,7 @@ class AgentTest {
     @Test
     void anExtractorOutageCostsOneStaleTurnButNotTheAnswer() {
         client.failExtraction = true;
-        AgentResult result = agent.handle(C1, "my name is Nur", null);
+        AgentResult result = agent.handle(C1, Persona.NONE, "my name is Nur", null);
 
         assertThat(result.answer()).isNotBlank();
         assertThat(agent.facts("c1").isPresent()).isFalse();
@@ -446,7 +455,7 @@ class AgentTest {
         longTerm.remember("c1", List.of(
                 new LongTermMemory.Entry(LongTermKind.PROFILE, "name", "Nur")));
 
-        agent.handle(C1, "hello", null);
+        agent.handle(C1, Persona.NONE, "hello", null);
 
         Message block = client.last.messages().stream()
                 .filter(m -> "system".equals(m.role()) && m.content().contains("name: Nur"))
@@ -480,12 +489,12 @@ class AgentTest {
                 new LongTermMemory.Entry(LongTermKind.PROFILE, "name", "Nur")));
 
         // Same visitor, a forked branch — a different conversation key entirely.
-        agent.handle(new MemoryScope("nur", "nur/experiment"), "hello", null);
+        agent.handle(new MemoryScope("nur", "nur/experiment"), Persona.NONE, "hello", null);
 
         assertThat(client.last.messages()).extracting(Message::content)
                 .anyMatch(content -> content.contains("name: Nur"));
         // ...and it is not everybody's memory: a different visitor sees none of it.
-        agent.handle(MemoryScope.of("someone-else"), "hello", null);
+        agent.handle(MemoryScope.of("someone-else"), Persona.NONE, "hello", null);
         assertThat(client.last.messages()).extracting(Message::content)
                 .noneMatch(content -> content.contains("name: Nur"));
     }
@@ -504,10 +513,10 @@ class AgentTest {
 
     @Test
     void theLongTermBlockIsPricedAsItsOwnSegmentOfTheBudget() {
-        long without = agent.handle(C1, "hello", null).budget().longTermTokens();
+        long without = agent.handle(C1, Persona.NONE, "hello", null).budget().longTermTokens();
         longTerm.remember("c1", List.of(
                 new LongTermMemory.Entry(LongTermKind.PROFILE, "name", "Nur")));
-        ContextBudget with = agent.handle(C1, "hello again", null).budget();
+        ContextBudget with = agent.handle(C1, Persona.NONE, "hello again", null).budget();
 
         // Attributable to a layer rather than lost in "context" — which is what makes the
         // question "why is this prompt expensive?" answerable.
@@ -528,7 +537,7 @@ class AgentTest {
                 task/database: Postgres 16
                 knowledge/project: meetupper""";
 
-        agent.handle(C1, "I'm Nur, working on meetupper, we're using Postgres 16", null);
+        agent.handle(C1, Persona.NONE, "I'm Nur, working on meetupper, we're using Postgres 16", null);
 
         assertThat(client.extractions).isEqualTo(1);
         assertThat(agent.facts("c1").entries())
@@ -543,7 +552,7 @@ class AgentTest {
         // Writing it to long-term immediately would leak it into every branch, including the
         // forks that exist precisely to disagree with it.
         client.extraction = "decision/database: Postgres 16";
-        agent.handle(C1, "right, we're going with Postgres 16", null);
+        agent.handle(C1, Persona.NONE, "right, we're going with Postgres 16", null);
 
         assertThat(agent.recall("c1").isPresent()).isFalse();
         assertThat(agent.facts("c1").settled())
@@ -562,7 +571,7 @@ class AgentTest {
         client.extraction = """
                 decision/database: Postgres 16
                 task/scratch: still deciding the hosting""";
-        agent.handle(C1, "Postgres 16 it is, still thinking about hosting", null);
+        agent.handle(C1, Persona.NONE, "Postgres 16 it is, still thinking about hosting", null);
 
         agent.finishTask(C1);
 
@@ -589,7 +598,7 @@ class AgentTest {
         // abandons them. Abandoning has to be possible, or a task that went nowhere gets to
         // write its dead ends into permanent memory.
         client.extraction = "decision/database: Postgres 16";
-        agent.handle(C1, "let's say Postgres 16", null);
+        agent.handle(C1, Persona.NONE, "let's say Postgres 16", null);
 
         agent.newTask(C1);
 
@@ -604,7 +613,7 @@ class AgentTest {
                 personal/name: Nur
                 task/database: Postgres 16""";
 
-        AgentResult result = agent.handle(C1, "I'm Nur and we use Postgres 16", null);
+        AgentResult result = agent.handle(C1, Persona.NONE, "I'm Nur and we use Postgres 16", null);
 
         assertThat(result.answer()).isNotBlank();
         assertThat(agent.recall("c1").isPresent()).isFalse();
@@ -619,9 +628,9 @@ class AgentTest {
         // model is being told what a subject is called, not where it lives.
         longTerm.remember("c1", List.of(new LongTermMemory.Entry(LongTermKind.PROFILE, "name", "Nur")));
         client.extraction = "task/database: Postgres 16";
-        agent.handle(C1, "we'll use Postgres 16", null);
+        agent.handle(C1, Persona.NONE, "we'll use Postgres 16", null);
 
-        agent.handle(C1, "actually 15", null);
+        agent.handle(C1, Persona.NONE, "actually 15", null);
 
         String brief = client.lastExtraction.messages().get(1).content();
         assertThat(brief).contains("KEYS IN USE:").contains("database").contains("name");
@@ -636,11 +645,109 @@ class AgentTest {
         // charged to nobody is a call nobody notices the cost of.
         client.extraction = "profile/name: Nur";
 
-        agent.handle(C1, "I'm Nur", null);
+        agent.handle(C1, Persona.NONE, "I'm Nur", null);
 
         assertThat(agent.facts("c1").buildTokens()).isEqualTo(60);
         // ...but the block itself did not move, so the revision counter still means what it says.
         assertThat(agent.facts("c1").revision()).isZero();
+    }
+
+    @Test
+    void aProfilePreferenceLeavesAsARequestParameterNotAsPolite() {
+        // The difference between this and writing "keep it short" in the prompt: the model cannot
+        // decline a ceiling. 400 is what the file asked for, so 400 is what the provider is told.
+        agent.handle(C1, Persona.of(RUSSELL), "hello", null);
+
+        assertThat(client.last.maxCompletionTokens()).isEqualTo(400);
+        assertThat(client.last.temperature()).isEqualTo(0.2);
+    }
+
+    @Test
+    void whatThePagePutsInTheBoxStillBeatsTheProfile() {
+        // Three tiers: explicit value, then profile, then yml default. The page has to come first
+        // or the settings panel would be decoration for anybody who owns a profile.
+        agent.handle(C1, Persona.of(RUSSELL), "hello",
+                AgentConfig.builder().maxCompletionTokens(64).build());
+
+        assertThat(client.last.maxCompletionTokens()).isEqualTo(64);
+        // Untouched by the page, so the profile still fills it — one field overridden, not all.
+        assertThat(client.last.temperature()).isEqualTo(0.2);
+    }
+
+    @Test
+    void whatTheProfileLeavesUnsetFallsThroughToTheYmlDefault() {
+        UserProfile quiet = new UserProfile("q", "Q", "English", "plain",
+                UserProfile.Format.NONE, List.of(), Limits.NONE, null);
+
+        agent.handle(C1, Persona.of(quiet), "hello", null);
+
+        assertThat(client.last.maxCompletionTokens()).isEqualTo(256);
+        assertThat(client.last.temperature()).isEqualTo(1.0);
+    }
+
+    @Test
+    void theProfileIsSentAsItsOwnSystemBlockUnderTheSystemPrompt() {
+        agent.handle(C1, Persona.of(RUSSELL), "hello", null);
+
+        assertThat(client.last.messages().get(0)).isEqualTo(Message.system("be brief"));
+        assertThat(client.last.messages().get(1).role()).isEqualTo("system");
+        assertThat(client.last.messages().get(1).content())
+                .contains("Russell")
+                .contains("Answer in: Russian")
+                .contains("short bullet points, at most 120 words")
+                .contains("use emoji");
+    }
+
+    @Test
+    void aLensNarrowsTheProfileItIsWornOverWithoutReplacingIt() {
+        Lens chemist = new Lens("chemist", "Chemist", "Answer as a chemist.",
+                List.of("give synthesis procedures"), List.of("реакц"), new Limits(null, 0.9, null));
+
+        // The user's limit wins where both speak — a lens changes the subject, not the person's
+        // standing preferences — but the lens still fills what the user left open.
+        agent.handle(C1, new Persona(RUSSELL, chemist), "hello", null);
+
+        assertThat(client.last.temperature()).isEqualTo(0.2);
+        assertThat(client.last.messages().get(1).content())
+                .contains("Russell")
+                .contains("Answer as a chemist.")
+                .contains("give synthesis procedures");
+    }
+
+    @Test
+    void theProfileIsPricedOnTheAnswersBudget() {
+        long without = agent.handle(C1, Persona.NONE, "hello", null).budget().profileTokens();
+        long with = agent.handle(C1, Persona.of(RUSSELL), "hello again", null).budget().profileTokens();
+
+        assertThat(without).isZero();
+        assertThat(with).isPositive();
+    }
+
+    @Test
+    void thePageIsToldTheProfilesNumbersSoItsBoxesDoNotOverrideThem() {
+        // The settings panel prefills from this and posts the same values straight back. Handed
+        // the raw defaults it would return them as an explicit override on every turn, and the
+        // enforced half of a profile would be dead in the browser while still passing every unit
+        // test that calls the agent directly. That is exactly what happened.
+        AgentConfig shown = agent.effectiveConfig(Persona.of(RUSSELL), null);
+
+        assertThat(shown.maxCompletionTokens()).isEqualTo(400);
+        assertThat(shown.temperature()).isEqualTo(0.2);
+        // Posting it back unchanged has to be a no-op, not an override.
+        assertThat(agent.effectiveConfig(Persona.of(RUSSELL), shown)).isEqualTo(shown);
+        // What the profile says nothing about still comes from the yml.
+        assertThat(shown.model()).isEqualTo("openai/gpt-oss-20b");
+        assertThat(shown.systemPrompt()).isEqualTo("be brief");
+    }
+
+    @Test
+    void theQuotedBudgetPricesTheProfileTheAnswerWouldActuallyUse() {
+        // The page asks for the budget before anything is sent. Quoting it without the persona
+        // would understate every personalized turn by the size of the block.
+        ContextBudget quoted = agent.budget(C1, Persona.of(RUSSELL), null);
+
+        assertThat(quoted.profileTokens()).isPositive();
+        assertThat(quoted.reservedCompletionTokens()).isEqualTo(400);
     }
 
     private Agent compressingAgent() {
@@ -650,24 +757,24 @@ class AgentTest {
     /** Enough turns to put four messages behind the two-message verbatim tail. */
     private AgentResult fourTurns(Agent target) {
         threeTurns(target);
-        return target.handle(C1, "what is my name?", null);
+        return target.handle(C1, Persona.NONE, "what is my name?", null);
     }
 
     private void threeTurns(Agent target) {
-        target.handle(C1, "my name is Nur", null);
-        target.handle(C1, "I work on meetupper", null);
-        target.handle(C1, "it is a Spring app", null);
+        target.handle(C1, Persona.NONE, "my name is Nur", null);
+        target.handle(C1, Persona.NONE, "I work on meetupper", null);
+        target.handle(C1, Persona.NONE, "it is a Spring app", null);
     }
 
     /** The same four turns, at the length a real message actually runs to. */
     private AgentResult wordyDialogue(Agent target) {
-        target.handle(C1, "my name is Nur and I am building an agent in Spring Boot "
+        target.handle(C1, Persona.NONE, "my name is Nur and I am building an agent in Spring Boot "
                 + "that talks to Groq models", null);
-        target.handle(C1, "it keeps a transcript and replays every word of it on each "
+        target.handle(C1, Persona.NONE, "it keeps a transcript and replays every word of it on each "
                 + "turn, which gets expensive", null);
-        target.handle(C1, "today I am adding compression so the old turns become notes "
+        target.handle(C1, Persona.NONE, "today I am adding compression so the old turns become notes "
                 + "instead of whole messages", null);
-        return target.handle(C1, "what is my name?", null);
+        return target.handle(C1, Persona.NONE, "what is my name?", null);
     }
 
     /** Keep the last 2 messages verbatim and fold once {@code compressEvery} pile up behind them. */
@@ -682,7 +789,8 @@ class AgentTest {
                 new AgentProperties.Context(Map.of(), 131_072, OverflowPolicy.FAIL, 0.8),
                 new AgentProperties.Compression(2, compressEvery, "summarizer", 120, "low"),
                 new AgentProperties.FactMemory("extractor", 12, 600, "low"),
-                new AgentProperties.LongTerm("", 24));
+                new AgentProperties.LongTerm("", 24),
+                new AgentProperties.Personalization(""));
     }
 
     /**

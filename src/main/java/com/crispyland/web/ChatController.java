@@ -12,6 +12,9 @@ import com.crispyland.agent.memory.LongTermStore;
 import com.crispyland.agent.memory.MemoryLayer;
 import com.crispyland.agent.memory.MemoryScope;
 import com.crispyland.agent.memory.Message;
+import com.crispyland.agent.profile.Persona;
+import com.crispyland.agent.profile.PersonaSelector;
+import com.crispyland.agent.profile.Profiles;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.util.List;
@@ -36,15 +39,22 @@ public class ChatController {
     private final ConversationIdResolver conversationIds;
     private final Branches branches;
     private final LongTermStore longTerm;
+    private final Profiles profiles;
+    private final PersonaSelector personas;
+    private final ActiveProfile activeProfile;
 
     public ChatController(Agent agent, AgentProperties properties,
                           ConversationIdResolver conversationIds, Branches branches,
-                          LongTermStore longTerm) {
+                          LongTermStore longTerm, Profiles profiles, PersonaSelector personas,
+                          ActiveProfile activeProfile) {
         this.agent = agent;
         this.properties = properties;
         this.conversationIds = conversationIds;
         this.branches = branches;
         this.longTerm = longTerm;
+        this.profiles = profiles;
+        this.personas = personas;
+        this.activeProfile = activeProfile;
     }
 
     @GetMapping("/")
@@ -52,10 +62,17 @@ public class ChatController {
         // Resolving here also mints the cookie for a first-time visitor, before they send anything.
         MemoryScope scope = scope(request, response);
         addBranches(model, scope.visitor());
-        AgentConfig config = properties.defaultConfig();
-        model.addAttribute("form", ChatForm.of("", config));
+        // No message yet, so nothing for the keyword rule to match on — this shows what the
+        // visitor's default would give them, which is what the page should be honest about.
+        PersonaSelector.Selection selection = select(request, null, null);
+        // The profile's numbers, not the raw yml ones. The boxes are posted straight back on the
+        // next turn, so prefilling them with the defaults would hand every request an explicit
+        // override and silently cancel the profile's limits.
+        AgentConfig config = agent.effectiveConfig(selection.persona(), null);
+        model.addAttribute("form", ChatForm.of("", config, lensIdOf(selection)));
         addMemory(model, scope, agent.transcript(scope.conversation()));
-        model.addAttribute("budget", agent.budget(scope, config));
+        addPersona(model, request, selection);
+        model.addAttribute("budget", agent.budget(scope, selection.persona(), config));
         addOptions(model, config);
         return "chat";
     }
@@ -65,22 +82,30 @@ public class ChatController {
                       HttpServletRequest request, HttpServletResponse response) {
         MemoryScope scope = scope(request, response);
         addBranches(model, scope.visitor());
-        addOptions(model, form.toAgentConfig().withFallback(properties.defaultConfig()));
+
+        // Selected once and reused for the answer, the budget and the page: choosing twice would
+        // let the keyword rule pick one lens for the call and a different one for the label.
+        PersonaSelector.Selection selection = select(request, form.selectedLens(), form.userInput());
+        Persona persona = selection.persona();
+        addPersona(model, request, selection);
+        // Resolved through the persona so the dropdowns show the model and effort the turn would
+        // actually use, for the same reason the numeric boxes are.
+        addOptions(model, agent.effectiveConfig(persona, form.toAgentConfig()));
 
         if (binding.hasErrors()) {
             model.addAttribute("error", "Some parameters could not be read — check the numeric fields.");
             addMemory(model, scope, agent.transcript(scope.conversation()));
-            model.addAttribute("budget", agent.budget(scope, properties.defaultConfig()));
+            model.addAttribute("budget", agent.budget(scope, persona, properties.defaultConfig()));
             return "chat";
         }
 
         try {
-            AgentResult result = agent.handle(scope, form.userInput(), form.toAgentConfig());
+            AgentResult result = agent.handle(scope, persona, form.userInput(), form.toAgentConfig());
             model.addAttribute("result", result);
             addMemory(model, scope, result.transcript());
-            model.addAttribute("budget", agent.budget(scope, result.effectiveConfig()));
+            model.addAttribute("budget", agent.budget(scope, persona, result.effectiveConfig()));
             // Keep the settings the agent actually used, but clear the box for the next turn.
-            model.addAttribute("form", ChatForm.of("", result.effectiveConfig()));
+            model.addAttribute("form", ChatForm.of("", result.effectiveConfig(), form.selectedLens()));
         } catch (ContextOverflowException e) {
             // Show the budget that caused the refusal, not the one the dialogue merely sits at.
             model.addAttribute("error", e.getMessage());
@@ -89,7 +114,7 @@ public class ChatController {
         } catch (AgentException e) {
             model.addAttribute("error", e.getMessage());
             addMemory(model, scope, agent.transcript(scope.conversation()));
-            model.addAttribute("budget", agent.budget(scope, form.toAgentConfig()));
+            model.addAttribute("budget", agent.budget(scope, persona, form.toAgentConfig()));
         }
         return "chat";
     }
@@ -184,6 +209,21 @@ public class ChatController {
         return "redirect:/";
     }
 
+    /**
+     * Answers as somebody else from the next message on.
+     * <p>
+     * Memory is deliberately untouched — not reset, not partitioned. That is the demonstration:
+     * the same transcript and the same remembered facts, asked the same question, come back
+     * formatted completely differently. Clearing memory here would make the switch look like it
+     * worked for the wrong reason.
+     */
+    @PostMapping("/profile/switch")
+    public String switchProfile(@RequestParam(required = false) String profile,
+                                HttpServletResponse response) {
+        activeProfile.switchTo(profile, response);
+        return "redirect:/";
+    }
+
     /** Who is asking and which of their branches is open — resolved once per request. */
     private MemoryScope scope(HttpServletRequest request, HttpServletResponse response) {
         // Resolving here also mints the cookie for a first-time visitor, before they send anything.
@@ -194,6 +234,31 @@ public class ChatController {
     private void addBranches(Model model, String visitor) {
         model.addAttribute("branches", branches.all(visitor));
         model.addAttribute("branch", branches.active(visitor));
+    }
+
+    /** Resolves the persona for one request: who they are, plus whichever lens applies. */
+    private PersonaSelector.Selection select(HttpServletRequest request, String lens, String message) {
+        return personas.select(activeProfile.current(request), lens, message);
+    }
+
+    /**
+     * The profile as the page shows it — including the reason it was chosen.
+     * <p>
+     * The reason is on screen rather than only in the logs because a lens changes what the agent
+     * refuses to do. "It would not answer that" is a bug report; "it would not answer that,
+     * wearing the psychologist lens, matched on 'тревог'" is a fixable one.
+     */
+    private void addPersona(Model model, HttpServletRequest request,
+                            PersonaSelector.Selection selection) {
+        model.addAttribute("persona", selection.persona());
+        model.addAttribute("personaWhy", selection.why());
+        model.addAttribute("profiles", profiles.users());
+        model.addAttribute("lenses", profiles.lenses());
+        model.addAttribute("activeProfile", activeProfile.current(request));
+    }
+
+    private static String lensIdOf(PersonaSelector.Selection selection) {
+        return selection.persona().hasLens() ? selection.lens().id() : null;
     }
 
     /**

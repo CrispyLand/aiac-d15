@@ -7,6 +7,8 @@ import com.crispyland.agent.llm.LlmClient;
 import com.crispyland.agent.memory.BranchStore;
 import com.crispyland.agent.memory.ConversationStore;
 import com.crispyland.agent.memory.MemoryExtractor;
+import com.crispyland.agent.profile.PersonaSelector;
+import com.crispyland.agent.profile.Profiles;
 import com.crispyland.agent.memory.HistoryCompressor;
 import com.crispyland.agent.memory.InMemoryBranchStore;
 import com.crispyland.agent.memory.InMemoryConversationStore;
@@ -130,6 +132,24 @@ public class AgentConfiguration {
                 : facts.model();
         return new MemoryExtractor(llmClient, model, facts.maxFacts(), facts.maxTokens(),
                 facts.reasoningEffort());
+    }
+
+    /**
+     * The profile directory reader. Holds no state and caches nothing, so a profile edited on
+     * disk takes effect on the next message rather than the next restart.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public Profiles profiles(AgentProperties properties) {
+        AgentProperties.Personalization personalization = properties.profiles();
+        return new Profiles((personalization == null)
+                ? java.nio.file.Path.of("./profiles") : personalization.path());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public PersonaSelector personaSelector(Profiles profiles) {
+        return new PersonaSelector(profiles);
     }
 
     /**

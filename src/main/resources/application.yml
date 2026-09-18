@@ -81,6 +81,20 @@ agent:
     # visitor's prompt starts a little larger every week and nobody notices until it overflows.
     max-entries: 24
 
+  # PERSONALIZATION — and note that this is not a fourth memory layer.
+  #
+  # Everything above is something the agent worked out from what was said, and each layer ends at
+  # some boundary. A profile ends at none of them: it is what a person declared about how they
+  # want to be answered, in a file they edit, and it applies identically whatever the conversation
+  # has been about. That difference is why it is priced on its own line in the budget and why it
+  # is rendered above every memory block — see ContextPlanner. Where a profile and a remembered
+  # preference disagree, the profile wins, because one was asked for and the other was inferred.
+  profiles:
+    # A directory, not classpath resources: packaged into the jar these would be read-only at
+    # exactly the moment somebody wants to change how the agent talks to them. Read fresh every
+    # turn, so an edit takes effect on the next message rather than the next restart.
+    directory: ./profiles
+
   # The second window. max-messages above bounds the dialogue in messages; the model bills
   # and rejects in tokens, so the prompt is priced locally before every call.
   context:

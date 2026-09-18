@@ -25,7 +25,23 @@ public record AgentProperties(
         Context context,
         Compression compression,
         FactMemory facts,
-        LongTerm longTerm) {
+        LongTerm longTerm,
+        Personalization profiles) {
+
+    /**
+     * Where the hand-edited profile files live.
+     *
+     * @param directory outside {@code src/main/resources} on purpose: packaged into the jar these
+     *                  would be read-only at exactly the moment somebody wants to change how the
+     *                  agent talks to them
+     */
+    public record Personalization(String directory) {
+
+        public java.nio.file.Path path() {
+            return java.nio.file.Path.of((directory == null || directory.isBlank())
+                    ? "./profiles" : directory);
+        }
+    }
 
     /** The starting point for every turn: the declared per-request defaults. */
     public AgentConfig defaultConfig() {

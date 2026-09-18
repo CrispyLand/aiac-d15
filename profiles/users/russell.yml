@@ -1,0 +1,44 @@
+# A user profile: how this person wants to be answered, on every request, whatever was asked.
+#
+# This is NOT memory. The agent may also have *learned* things about Russell from what he has
+# said in passing — those live in long-term memory and are shown on the page under "What you
+# have told me". When the two disagree, this file wins: it is what he asked for, rather than
+# what the agent inferred.
+#
+# Edit and send another message; there is no restart. The file is read fresh each turn.
+
+id: russell
+display-name: Russell
+
+# Answered in Russian no matter which language the question arrives in. This is the single most
+# visible line in the whole feature — ask in English, get Russian back, having never said so.
+language: Russian
+tone: formal
+
+format:
+  shape: short bullet points, no introduction and no closing summary
+  # A target the model is asked for. The ceiling it cannot pass is limits.max-completion-tokens
+  # below — words are not something an API request can cap, and tokens are.
+  max-words: 120
+
+never:
+  - use emoji
+  - open with pleasantries or restate the question before answering
+  - apologise for what you cannot do; say it in one line and move on
+
+# The enforced half. These become actual request parameters rather than prose, so "short" stops
+# being a preference the model weighs against everything else it was told.
+limits:
+  max-completion-tokens: 600
+  temperature: 0.2
+
+  # Not optional once the ceiling above is tight, and this was found the hard way rather than
+  # reasoned out. On gpt-oss the hidden reasoning tokens are billed against the same ceiling and
+  # are spent FIRST. With this line absent and the ceiling at 400, the model spent the entire
+  # budget deliberating about whether an economist should answer a question about software
+  # architecture, and what came back was that deliberation, cut off mid-word. Not a short answer —
+  # no answer. Asking for brevity and leaving the model free to think at length is a contradiction
+  # the API resolves in favour of the thinking.
+  reasoning-effort: low
+
+default-lens: economist

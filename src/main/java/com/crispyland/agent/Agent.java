@@ -14,6 +14,7 @@ import com.crispyland.agent.memory.LongTermStore;
 import com.crispyland.agent.memory.MemoryExtractor;
 import com.crispyland.agent.memory.MemoryRouter;
 import com.crispyland.agent.memory.MemoryScope;
+import com.crispyland.agent.profile.Persona;
 import com.crispyland.agent.memory.MemoryState;
 import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.memory.MessageStats;
@@ -102,10 +103,11 @@ public class Agent {
      * @throws AgentException if a policy rejects the exchange, the context window cannot
      *         hold the call, or the provider fails
      */
-    public AgentResult handle(MemoryScope scope, String userInput, AgentConfig config) {
+    public AgentResult handle(MemoryScope scope, Persona persona, String userInput, AgentConfig config) {
         MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
+        Persona who = (persona == null) ? Persona.NONE : persona;
         String id = where.conversation();
-        AgentConfig effective = (config == null) ? defaults : config.withFallback(defaults);
+        AgentConfig effective = effectiveConfig(who, config);
 
         String prompt = inputPolicy.apply(userInput);
 
@@ -119,7 +121,7 @@ public class Agent {
 
         // Priced before a byte leaves the process: an oversized prompt is billed as a
         // rejection, so the cheapest place to find out it will not fit is here.
-        ContextPlanner.ContextPlan plan = contextPlanner.plan(effective, memory, prompt);
+        ContextPlanner.ContextPlan plan = contextPlanner.plan(effective, who, memory, prompt);
         ContextBudget budget = plan.budget();
         if (budget.trimmed()) {
             log.info("Context trim: dropped {} oldest message(s) to fit {} of {} tokens",
@@ -185,9 +187,30 @@ public class Agent {
      * What the dialogue already costs, before anything new is typed. Lets the window be
      * watched as it fills rather than only at the turn that breaks it.
      */
-    public ContextBudget budget(MemoryScope scope, AgentConfig config) {
-        AgentConfig effective = (config == null) ? defaults : config.withFallback(defaults);
-        return contextPlanner.budget(effective, memory(scope));
+    public ContextBudget budget(MemoryScope scope, Persona persona, AgentConfig config) {
+        Persona who = (persona == null) ? Persona.NONE : persona;
+        return contextPlanner.budget(effectiveConfig(who, config), who, memory(scope));
+    }
+
+    /**
+     * What a request would actually be made with: three tiers, and the order is the whole of what
+     * "enforced in code" means here.
+     * <p>
+     * What the caller set explicitly is someone overriding this one request on purpose and wins;
+     * what the profile asks for is a standing preference and fills the gaps; the yml is what to do
+     * when nobody said. Resolving against the defaults first would fill every gap before the
+     * profile was consulted, leaving it nothing to apply and making it prose-only again.
+     * <p>
+     * Public because the page has to prefill its settings boxes with these numbers rather than the
+     * raw defaults. Showing 1,024 in a box while sending 600 would be a lie, and worse, the box is
+     * posted back — so the form would hand back the default as an explicit override and quietly
+     * beat the profile on every single turn. That is not a display bug; it silently disables the
+     * enforced half of the feature.
+     */
+    public AgentConfig effectiveConfig(Persona persona, AgentConfig config) {
+        Persona who = (persona == null) ? Persona.NONE : persona;
+        return who.applyTo((config == null) ? AgentConfig.builder().build() : config)
+                .withFallback(defaults);
     }
 
     /** Every layer at once, gathered here so what is priced is what would have been sent. */

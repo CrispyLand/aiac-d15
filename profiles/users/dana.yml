@@ -1,0 +1,29 @@
+# The contrast case. Same agent, same memory, same question — deliberately opposite preferences,
+# so a side-by-side run shows the profile doing the work rather than the prompt.
+
+id: dana
+display-name: Dana
+
+language: English
+tone: casual and warm
+
+format:
+  shape: flowing prose, two or three paragraphs, no bullet lists
+  max-words: 350
+
+never:
+  - use bullet points or numbered lists
+  - answer in fewer than two paragraphs
+
+limits:
+  # Half again Russell's ceiling. The same question cannot produce the same-length answer for
+  # both of them, and that is enforced by the request rather than requested in the prompt.
+  max-completion-tokens: 900
+  temperature: 0.7
+
+  # Left unset on purpose, to be the other half of the pair: with this much headroom the model can
+  # afford to think and still write three paragraphs, so nothing has to be taken away from it.
+  # Russell's file sets it because his ceiling is tight. The setting belongs to the budget it is
+  # sharing, not to the agent.
+
+default-lens: psychologist

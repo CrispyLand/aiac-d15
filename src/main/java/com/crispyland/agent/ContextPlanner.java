@@ -5,6 +5,7 @@ import com.crispyland.agent.memory.LongTermMemory;
 import com.crispyland.agent.memory.MemoryState;
 import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.memory.Summary;
+import com.crispyland.agent.profile.Persona;
 import com.crispyland.agent.usage.BpeTokenCounter;
 import com.crispyland.agent.usage.ContextBudget;
 import com.crispyland.agent.usage.OverflowPolicy;
@@ -29,6 +30,14 @@ import java.util.Map;
  * prompt. The system prompt is an instruction the user edits; recalled memory is state. Labelling
  * them separately is what stops the model from reading last week's notes as a fresh directive,
  * and it is what lets the budget attribute tokens to a layer instead of to "context".
+ * <p>
+ * The profile block breaks the most-durable-first rule on purpose, and it is the one exception.
+ * Everything else is ordered by age because later is newer and newer should win; a profile is
+ * ordered by <em>authority</em>, because it is not something the agent learned at any point in
+ * time — it is a standing instruction from the person being answered. It therefore sits directly
+ * under the system prompt, above every remembered layer, and says in its own words that it
+ * outranks them. Put it where its age suggests and a preference someone wrote down this morning
+ * loses to one the extractor inferred from a throwaway remark last month.
  */
 public class ContextPlanner {
 
@@ -73,18 +82,20 @@ public class ContextPlanner {
      * @throws ContextOverflowException under {@link OverflowPolicy#FAIL}, or under
      *         {@link OverflowPolicy#TRIM} when even an empty history does not fit
      */
-    public ContextPlan plan(AgentConfig config, MemoryState memory, String input) {
+    public ContextPlan plan(AgentConfig config, Persona persona, MemoryState memory, String input) {
         MemoryState state = (memory == null) ? MemoryState.EMPTY : memory;
 
         // The system prompt is re-applied fresh each turn rather than stored, so editing it
         // on the page takes effect immediately — and is re-paid for on every single call.
         Message system = hasSystemPrompt(config) ? Message.system(config.systemPrompt()) : null;
+        Message profile = profileMessage(persona);
         Message known = longTermMessage(state.longTerm());
         Message workingNote = workingMessage(state.working());
         Message recall = recallMessage(state.summary());
         Message userMessage = Message.user(input);
 
         long systemTokens = counter.count(system);
+        long profileTokens = counter.count(profile);
         long longTermTokens = counter.count(known);
         long workingTokens = counter.count(workingNote);
         long summaryTokens = counter.count(recall);
@@ -105,8 +116,8 @@ public class ContextPlanner {
 
         int dropped = 0;
         if (policy == OverflowPolicy.TRIM) {
-            long fixed = systemTokens + longTermTokens + workingTokens + summaryTokens
-                    + inputTokens + templateTokens + reserved;
+            long fixed = systemTokens + profileTokens + longTermTokens + workingTokens
+                    + summaryTokens + inputTokens + templateTokens + reserved;
             while (dropped < replayed.size() && fixed + historyTokens > window) {
                 historyTokens -= perMessage[dropped];
                 dropped++;
@@ -121,8 +132,8 @@ public class ContextPlanner {
         }
 
         ContextBudget budget = new ContextBudget(config.model(), window, systemTokens,
-                longTermTokens, workingTokens, summaryTokens, historyTokens, inputTokens,
-                templateTokens, reserved, dropped, state.summary().replacedTokens(),
+                profileTokens, longTermTokens, workingTokens, summaryTokens, historyTokens,
+                inputTokens, templateTokens, reserved, dropped, state.summary().replacedTokens(),
                 overhead.calibrated(config.model()), warnAt);
 
         // OFF deliberately sends anyway, so the provider's own rejection can be observed.
@@ -133,6 +144,9 @@ public class ContextPlanner {
         List<Message> messages = new ArrayList<>(replayed.size() + 5);
         if (system != null) {
             messages.add(system);
+        }
+        if (profile != null) {
+            messages.add(profile);
         }
         if (known != null) {
             messages.add(known);
@@ -152,7 +166,7 @@ public class ContextPlanner {
      * Prices a dialogue with no new message — what the page shows before anything is typed,
      * so the window filling up is visible turn by turn rather than only at the moment it breaks.
      */
-    public ContextBudget budget(AgentConfig config, MemoryState memory) {
+    public ContextBudget budget(AgentConfig config, Persona persona, MemoryState memory) {
         MemoryState state = (memory == null) ? MemoryState.EMPTY : memory;
 
         long systemTokens = hasSystemPrompt(config)
@@ -163,12 +177,30 @@ public class ContextPlanner {
         }
 
         return new ContextBudget(config.model(), windowFor(config.model()), systemTokens,
+                counter.count(profileMessage(persona)),
                 counter.count(longTermMessage(state.longTerm())),
                 counter.count(workingMessage(state.working())),
                 counter.count(recallMessage(state.summary())), historyTokens, 0L,
                 overhead.forModel(config.model()), reserved(config), 0,
                 state.summary().replacedTokens(),
                 overhead.calibrated(config.model()), warnAt);
+    }
+
+    /**
+     * The profile — not a memory layer, and the only block here that was written by the user
+     * rather than derived from what they said.
+     * <p>
+     * Sent as its own {@code system} message for the same reason the layers are: so the budget can
+     * price it separately, and so the model is not left to work out which part of one long block
+     * is an instruction and which part is recalled state. {@link Persona#render} carries the
+     * precedence wording; this method only decides that the block exists and where it sits.
+     */
+    private static Message profileMessage(Persona persona) {
+        if (persona == null || !persona.isPresent()) {
+            return null;
+        }
+        String block = persona.render();
+        return block.isBlank() ? null : Message.system(block);
     }
 
     /**

@@ -123,6 +123,17 @@
         .danger { background: transparent; border: 1px solid #e8b4b4; color: #c92a2a;
                   border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: 600; }
         .danger:hover { background: #fff0f0; border-color: #c92a2a; }
+        /* Personalization gets its own colour, deliberately not one of the three memory colours:
+           it is not a layer, and colouring it like one would say it was. */
+        .persona { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                   margin: -8px 0 14px; font-size: 12px; color: var(--muted); }
+        .pchip { background: #eceef1; border: 1px solid var(--line); border-radius: 999px;
+                 padding: 5px 12px; font-size: 12px; font-weight: 600; color: var(--muted); }
+        .pchip:hover { background: #e4e7eb; color: var(--ink); }
+        .pchip.on { background: #fff4e6; border-color: #f76707; color: #d9480f; cursor: default; }
+        .persona .why { font-style: italic; opacity: .85; }
+        .lenspick { border: 1px solid var(--line); border-radius: 7px; padding: 5px 9px;
+                    font-size: 12px; background: #fff; color: var(--ink); }
         /* Branches sit under the layers because they cut across them: a fork copies short-term
            and working memory, and shares long-term with every other branch. */
         .branches { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -166,6 +177,7 @@
         }
         .seg { height: 100%; }
         .seg.sys { background: #7048e8; }
+        .seg.prof { background: #f76707; }
         .seg.sum { background: #0ca678; }
         .seg.lt { background: #ae3ec9; }
         .seg.facts { background: #2f9e44; }
@@ -251,6 +263,41 @@
         </div>
     </div>
 
+    <!-- Personalization, which is NOT a memory layer. Everything in the panel above is something
+         the agent worked out from what was said; this is what somebody declared about how they
+         want to be answered. Switching it leaves every memory layer untouched on purpose — same
+         transcript, same remembered facts, same question, visibly different answer. -->
+    <div class="persona" th:if="${!#lists.isEmpty(profiles)}">
+        <span>profile</span>
+        <button type="submit" form="profileForm" name="profile" value=""
+                class="pchip" th:classappend="${activeProfile == null} ? 'on'"
+                th:disabled="${activeProfile == null}"
+                title="Answer with no profile at all — the baseline to compare the others against.">
+            none
+        </button>
+        <button th:each="p : ${profiles}" type="submit" form="profileForm" name="profile"
+                class="pchip" th:classappend="${p.id == activeProfile} ? 'on'"
+                th:value="${p.id}" th:disabled="${p.id == activeProfile}"
+                th:title="${p.language} + ', ' + ${p.tone}">
+            <span th:text="${p.label}">Russell</span>
+        </button>
+
+        <!-- Posted with the message rather than as its own switch: a lens is chosen per question
+             ("answer this one as a chemist"), while the profile above is who you are and persists.
+             Left on "auto", the keyword rule and then the user's default decide. -->
+        <select class="lenspick" name="lens" form="askForm" title="Which role to answer in.">
+            <option value="" th:selected="${param.lens == null}">lens: auto</option>
+            <option th:each="l : ${lenses}" th:value="${l.id}" th:text="${l.label}"
+                    th:selected="${form.lens != null and l.id == form.lens}">Chemist</option>
+        </select>
+
+        <!-- The reason, not just the result. A lens changes what the agent refuses to do, so
+             "it would not answer that" needs to be traceable to the word that selected it. -->
+        <span class="why" th:if="${persona.present}"
+              th:text="'· ' + ${persona.label} + ' (' + ${personaWhy} + ')'">· Russell · economist</span>
+        <span class="why" th:unless="${persona.present}">· no profile — answers are unpersonalized</span>
+    </div>
+
     <!-- Which line of the conversation is open. A branch is the same dialogue under a different
          storage key, so short-term and working memory fork with it; long-term does not. -->
     <div class="branches">
@@ -290,7 +337,7 @@
         </button>
     </div>
 
-    <form method="post" action="/">
+    <form id="askForm" method="post" action="/">
 
         <!-- 1. Parameters -->
         <div class="card">
@@ -449,6 +496,7 @@
                 <!-- Segment order follows the prompt's own layer order, so the bar reads as a
                      picture of the request rather than as an arbitrary stack. -->
                 <span class="seg sys" th:style="'width:' + ${budget.systemPercent} + '%'"></span>
+                <span class="seg prof" th:style="'width:' + ${budget.profilePercent} + '%'"></span>
                 <span class="seg lt" th:style="'width:' + ${budget.longTermPercent} + '%'"></span>
                 <span class="seg facts" th:style="'width:' + ${budget.workingPercent} + '%'"></span>
                 <span class="seg sum" th:style="'width:' + ${budget.summaryPercent} + '%'"></span>
@@ -462,6 +510,8 @@
             <div class="key">
                 <span><i style="background:#7048e8"></i>system prompt
                       <b th:text="${#numbers.formatInteger(budget.systemTokens, 1, 'COMMA')}">0</b></span>
+                <span th:if="${budget.hasProfile}"><i style="background:#f76707"></i>profile
+                      <b th:text="${#numbers.formatInteger(budget.profileTokens, 1, 'COMMA')}">0</b></span>
                 <span th:if="${budget.hasLongTerm}"><i style="background:#ae3ec9"></i>long-term
                       <b th:text="${#numbers.formatInteger(budget.longTermTokens, 1, 'COMMA')}">0</b></span>
                 <span th:if="${budget.hasWorking}"><i style="background:#2f9e44"></i>working
@@ -534,6 +584,7 @@
          The submitting button carries the interesting value (which branch, which message), which
          is why one form each is enough for all of them. -->
     <form id="resetForm" method="post" action="/reset"></form>
+    <form id="profileForm" method="post" action="/profile/switch"></form>
     <form id="switchForm" method="post" action="/branch/switch"></form>
     <form id="forkForm" method="post" action="/branch/fork"></form>
     <form id="finishTaskForm" method="post" action="/task/finish"></form>

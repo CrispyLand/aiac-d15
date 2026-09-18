@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.crispyland.agent.memory.Facts;
+import com.crispyland.agent.profile.Limits;
+import com.crispyland.agent.profile.Persona;
+import com.crispyland.agent.profile.UserProfile;
 import com.crispyland.agent.memory.LongTermKind;
 import com.crispyland.agent.memory.LongTermMemory;
 import com.crispyland.agent.memory.MemoryLayer;
@@ -27,6 +30,10 @@ class ContextPlannerTest {
             .maxCompletionTokens(100)
             .build();
 
+    private static final UserProfile RUSSELL = new UserProfile("russell", "Russell", "Russian",
+            "formal", new UserProfile.Format("short bullet points", 120), List.of("use emoji"),
+            Limits.NONE, null);
+
     private static ContextPlanner planner(int window, OverflowPolicy policy) {
         return new ContextPlanner(new BpeTokenCounter(), new TemplateOverhead(), Map.of(),
                 window, policy, 0.8);
@@ -35,7 +42,7 @@ class ContextPlannerTest {
     @Test
     void theSegmentsAddUpToTheEstimatedPrompt() {
         ContextBudget budget = planner(1000, OverflowPolicy.FAIL)
-                .plan(CONFIG, MemoryState.of(history(2)), "hello").budget();
+                .plan(CONFIG, Persona.NONE, MemoryState.of(history(2)), "hello").budget();
 
         assertThat(budget.promptTokens()).isEqualTo(budget.systemTokens() + budget.summaryTokens()
                 + budget.historyTokens() + budget.inputTokens() + budget.overheadTokens());
@@ -49,7 +56,7 @@ class ContextPlannerTest {
         ContextPlanner planner = new ContextPlanner(new BpeTokenCounter(), overhead, Map.of(),
                 1000, OverflowPolicy.OFF, 0.8);
 
-        ContextBudget first = planner.plan(CONFIG, MemoryState.EMPTY, "hello").budget();
+        ContextBudget first = planner.plan(CONFIG, Persona.NONE, MemoryState.EMPTY, "hello").budget();
         assertThat(first.calibrated()).isFalse();
         assertThat(first.overheadTokens()).isZero();
 
@@ -57,7 +64,7 @@ class ContextPlannerTest {
         // harmony template, and it is the same on every subsequent call.
         overhead.observe("openai/gpt-oss-20b", first.countedTokens(), first.countedTokens() + 60);
 
-        ContextBudget second = planner.plan(CONFIG, MemoryState.EMPTY, "hello").budget();
+        ContextBudget second = planner.plan(CONFIG, Persona.NONE, MemoryState.EMPTY, "hello").budget();
         assertThat(second.calibrated()).isTrue();
         assertThat(second.overheadTokens()).isEqualTo(60);
         assertThat(second.promptTokens()).isEqualTo(first.promptTokens() + 60);
@@ -90,7 +97,7 @@ class ContextPlannerTest {
         // this is the arithmetic a message-counted window cannot see.
         ContextBudget budget = planner(1000, OverflowPolicy.OFF)
                 .plan(AgentConfig.builder().model("m").maxCompletionTokens(995).build(),
-                        MemoryState.EMPTY, "hello").budget();
+                        Persona.NONE, MemoryState.EMPTY, "hello").budget();
 
         assertThat(budget.promptTokens()).isLessThan(1000);
         assertThat(budget.overflowing()).isTrue();
@@ -101,8 +108,8 @@ class ContextPlannerTest {
         ContextPlanner planner = new ContextPlanner(new BpeTokenCounter(), new TemplateOverhead(),
                 Map.of("openai/gpt-oss-20b", 8192), 131_072, OverflowPolicy.OFF, 0.8);
 
-        assertThat(planner.budget(CONFIG, MemoryState.EMPTY).contextWindow()).isEqualTo(8192);
-        assertThat(planner.budget(AgentConfig.builder().model("unlisted").build(), MemoryState.EMPTY)
+        assertThat(planner.budget(CONFIG, Persona.NONE, MemoryState.EMPTY).contextWindow()).isEqualTo(8192);
+        assertThat(planner.budget(AgentConfig.builder().model("unlisted").build(), Persona.NONE, MemoryState.EMPTY)
                 .contextWindow()).isEqualTo(131_072);
     }
 
@@ -111,7 +118,7 @@ class ContextPlannerTest {
         ContextPlanner planner = new ContextPlanner(new BpeTokenCounter(), new TemplateOverhead(),
                 Map.of(), 130, OverflowPolicy.OFF, 0.8);
 
-        ContextBudget budget = planner.plan(CONFIG, MemoryState.EMPTY, "hello").budget();
+        ContextBudget budget = planner.plan(CONFIG, Persona.NONE, MemoryState.EMPTY, "hello").budget();
 
         assertThat(budget.overflowing()).isFalse();
         assertThat(budget.warning()).isTrue();
@@ -120,7 +127,7 @@ class ContextPlannerTest {
 
     @Test
     void failRefusesTheCallAndExplainsTheArithmetic() {
-        assertThatThrownBy(() -> planner(120, OverflowPolicy.FAIL).plan(CONFIG, MemoryState.of(history(10)), "hello"))
+        assertThatThrownBy(() -> planner(120, OverflowPolicy.FAIL).plan(CONFIG, Persona.NONE, MemoryState.of(history(10)), "hello"))
                 .isInstanceOf(ContextOverflowException.class)
                 .hasMessageContaining("over by")
                 .hasMessageContaining("system")
@@ -129,7 +136,7 @@ class ContextPlannerTest {
 
     @Test
     void offMeasuresTheOverflowButStillBuildsTheRequest() {
-        ContextPlanner.ContextPlan plan = planner(120, OverflowPolicy.OFF).plan(CONFIG, MemoryState.of(history(10)), "hello");
+        ContextPlanner.ContextPlan plan = planner(120, OverflowPolicy.OFF).plan(CONFIG, Persona.NONE, MemoryState.of(history(10)), "hello");
 
         assertThat(plan.budget().overflowing()).isTrue();
         assertThat(plan.budget().droppedMessages()).isZero();
@@ -138,7 +145,7 @@ class ContextPlannerTest {
 
     @Test
     void trimDropsOldestFirstAndKeepsTheWindowOpeningOnAUserMessage() {
-        ContextPlanner.ContextPlan plan = planner(150, OverflowPolicy.TRIM).plan(CONFIG, MemoryState.of(history(10)), "hello");
+        ContextPlanner.ContextPlan plan = planner(150, OverflowPolicy.TRIM).plan(CONFIG, Persona.NONE, MemoryState.of(history(10)), "hello");
 
         assertThat(plan.budget().trimmed()).isTrue();
         assertThat(plan.budget().overflowing()).isFalse();
@@ -151,13 +158,13 @@ class ContextPlannerTest {
     @Test
     void trimStillFailsWhenTheFixedPartsAloneDoNotFit() {
         // Nothing left to drop: system prompt + new message + reserved reply already overflow.
-        assertThatThrownBy(() -> planner(100, OverflowPolicy.TRIM).plan(CONFIG, MemoryState.of(history(10)), "hello"))
+        assertThatThrownBy(() -> planner(100, OverflowPolicy.TRIM).plan(CONFIG, Persona.NONE, MemoryState.of(history(10)), "hello"))
                 .isInstanceOf(ContextOverflowException.class);
     }
 
     @Test
     void anEmptyDialogueStillCostsTheSystemPromptAndTheReservedReply() {
-        ContextBudget budget = planner(1000, OverflowPolicy.FAIL).budget(CONFIG, MemoryState.EMPTY);
+        ContextBudget budget = planner(1000, OverflowPolicy.FAIL).budget(CONFIG, Persona.NONE, MemoryState.EMPTY);
 
         assertThat(budget.historyTokens()).isZero();
         assertThat(budget.inputTokens()).isZero();
@@ -170,7 +177,7 @@ class ContextPlannerTest {
         Summary summary = Summary.EMPTY.rewrittenAs("user is called Nur", 8, 400, 60);
 
         ContextPlanner.ContextPlan plan = planner(1000, OverflowPolicy.FAIL)
-                .plan(CONFIG, MemoryState.of(summary, history(2)), "hello");
+                .plan(CONFIG, Persona.NONE, MemoryState.of(summary, history(2)), "hello");
 
         // System prompt first, then what was forgotten, then what is still remembered verbatim.
         assertThat(plan.messages()).extracting(Message::role)
@@ -188,7 +195,7 @@ class ContextPlannerTest {
     @Test
     void withoutASummaryNothingAboutTheBudgetChanges() {
         ContextBudget budget = planner(1000, OverflowPolicy.FAIL)
-                .plan(CONFIG, MemoryState.of(history(2)), "hello").budget();
+                .plan(CONFIG, Persona.NONE, MemoryState.of(history(2)), "hello").budget();
 
         assertThat(budget.compressed()).isFalse();
         assertThat(budget.summaryTokens()).isZero();
@@ -203,7 +210,7 @@ class ContextPlannerTest {
         // by neither, and nothing said so. Short-term memory is now bounded only where it is
         // written, so whatever the store still holds is exactly what the model sees.
         ContextPlanner.ContextPlan plan = planner(1000, OverflowPolicy.FAIL)
-                .plan(CONFIG, MemoryState.of(history(10)), "hello");
+                .plan(CONFIG, Persona.NONE, MemoryState.of(history(10)), "hello");
 
         assertThat(plan.messages()).hasSize(12);
         assertThat(plan.messages()).extracting(Message::content)
@@ -219,7 +226,7 @@ class ContextPlannerTest {
                 new Facts.Fact("deadline", "end of Q3")), 12, 90);
 
         ContextPlanner.ContextPlan plan = planner(1000, OverflowPolicy.FAIL)
-                .plan(CONFIG, MemoryState.of(working, history(4)), "hello");
+                .plan(CONFIG, Persona.NONE, MemoryState.of(working, history(4)), "hello");
 
         assertThat(plan.messages()).extracting(Message::role)
                 .containsExactly("system", "system", "user", "assistant", "user", "assistant", "user");
@@ -243,7 +250,7 @@ class ContextPlannerTest {
                 Facts.EMPTY.updatedWith(List.of(new Facts.Fact("database", "Postgres 16")), 12, 90),
                 history(2));
 
-        ContextPlanner.ContextPlan plan = planner(2000, OverflowPolicy.FAIL).plan(CONFIG, all, "hello");
+        ContextPlanner.ContextPlan plan = planner(2000, OverflowPolicy.FAIL).plan(CONFIG, Persona.NONE, all, "hello");
         ContextBudget budget = plan.budget();
 
         // Most durable first, and working memory before the notes: the block outranks the
@@ -272,7 +279,7 @@ class ContextPlannerTest {
         // A reset leaves the visitor's layer intact and everything conversation-scoped empty —
         // this is the state the very next prompt is built from.
         ContextPlanner.ContextPlan plan = planner(2000, OverflowPolicy.FAIL)
-                .plan(CONFIG, MemoryState.of(known, List.of()), "hello");
+                .plan(CONFIG, Persona.NONE, MemoryState.of(known, List.of()), "hello");
 
         assertThat(plan.messages()).extracting(Message::role)
                 .containsExactly("system", "system", "user");
@@ -284,6 +291,54 @@ class ContextPlannerTest {
         assertThat(plan.budget().historyTokens()).isZero();
         assertThat(plan.budget().workingTokens()).isZero();
         assertThat(plan.budget().longTermTokens()).isPositive();
+    }
+
+    @Test
+    void theProfileIsSentAboveEveryMemoryLayerBecauseItOutranksThem() {
+        // The layers are ordered oldest-first. The profile breaks that on purpose: it is placed by
+        // authority, not by age, so the model reads "they asked for bullet points" before it reads
+        // anything it worked out about them. Sent second, directly under the system prompt.
+        MemoryState all = new MemoryState(
+                LongTermMemory.EMPTY.updatedWith(List.of(
+                        new LongTermMemory.Entry(LongTermKind.PROFILE, "style", "long essays")), 24),
+                Summary.EMPTY.rewrittenAs("they argued about databases", 8, 400, 60),
+                Facts.EMPTY.updatedWith(List.of(new Facts.Fact("database", "Postgres 16")), 12, 90),
+                history(2));
+
+        ContextPlanner.ContextPlan plan = planner(2000, OverflowPolicy.FAIL)
+                .plan(CONFIG, Persona.of(RUSSELL), all, "hello");
+
+        assertThat(plan.messages().get(0).content()).isEqualTo("be brief");
+        assertThat(plan.messages().get(1).content()).contains("Russell").contains("this wins");
+        assertThat(plan.messages().get(2).content()).contains("style: long essays");
+        assertThat(plan.messages().get(3).content()).contains("database: Postgres 16");
+    }
+
+    @Test
+    void theProfileIsPricedOnItsOwnLineAndNotCountedAsMemory() {
+        ContextBudget budget = planner(2000, OverflowPolicy.FAIL)
+                .plan(CONFIG, Persona.of(RUSSELL), MemoryState.of(history(2)), "hello").budget();
+
+        // In the prompt total, because it is real tokens on every call...
+        assertThat(budget.profileTokens()).isPositive();
+        assertThat(budget.hasProfile()).isTrue();
+        assertThat(budget.promptTokens()).isEqualTo(budget.systemTokens() + budget.profileTokens()
+                + budget.memoryTokens() + budget.inputTokens() + budget.overheadTokens());
+        // ...but not in memoryTokens, which exists to answer "is this layer worth what it costs?".
+        // A profile is not up for that question: the user asked for it.
+        assertThat(budget.memoryTokens()).isEqualTo(budget.historyTokens());
+    }
+
+    @Test
+    void noProfileCostsNothingAtAll() {
+        ContextPlanner.ContextPlan plan = planner(2000, OverflowPolicy.FAIL)
+                .plan(CONFIG, Persona.NONE, MemoryState.of(history(2)), "hello");
+
+        assertThat(plan.budget().profileTokens()).isZero();
+        assertThat(plan.budget().hasProfile()).isFalse();
+        // No empty system message standing in for the block it does not have.
+        assertThat(plan.messages()).extracting(Message::role)
+                .containsExactly("system", "user", "assistant", "user");
     }
 
     @Test

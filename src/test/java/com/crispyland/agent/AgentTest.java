@@ -26,6 +26,9 @@ import com.crispyland.agent.profile.UserProfile;
 import com.crispyland.agent.policy.DefaultInputPolicy;
 import com.crispyland.agent.policy.DefaultOutputPolicy;
 import com.crispyland.agent.policy.PolicyViolationException;
+import com.crispyland.agent.task.PausedTurn;
+import com.crispyland.agent.task.TaskStage;
+import com.crispyland.agent.task.TaskState;
 import com.crispyland.agent.usage.BpeTokenCounter;
 import com.crispyland.agent.usage.ContextBudget;
 import com.crispyland.agent.usage.OverflowPolicy;
@@ -558,7 +561,7 @@ class AgentTest {
         assertThat(agent.facts("c1").settled())
                 .containsExactly(new Facts.Fact("database", "Postgres 16", true));
 
-        LongTermMemory kept = agent.finishTask(C1);
+        LongTermMemory kept = agent.finishTask(C1).longTerm();
 
         assertThat(kept.of(LongTermKind.DECISION)).containsExactly(
                 new LongTermMemory.Entry(LongTermKind.DECISION, "database", "Postgres 16"));
@@ -605,6 +608,197 @@ class AgentTest {
         assertThat(agent.facts("c1").isPresent()).isFalse();
         assertThat(agent.recall("c1").isPresent()).isFalse();
         assertThat(agent.transcript("c1")).hasSize(2);
+    }
+
+    @Test
+    void theModelProposesTheMoveAndTheNextPromptIsBuiltFromWhereItLanded() {
+        // The hybrid in full: the model says where the job has got to, the transition table decides
+        // whether it may, and only then does the block exist for the following turn to read. A
+        // model that wrote the state directly would be free to declare itself finished.
+        client.extraction = """
+                stage/stage: execution
+                stage/step: writing the migration script
+                stage/next: review the script
+                stage/waiting: user""";
+        agent.handle(C1, Persona.NONE, "right, start on the migration", null);
+
+        assertThat(agent.task("c1").stage()).isEqualTo(TaskStage.EXECUTION);
+        assertThat(agent.task("c1").waitingOnUser()).isTrue();
+
+        client.extraction = "none/: nothing to keep";
+        agent.handle(C1, Persona.NONE, "and?", null);
+
+        // Carried into the very next call, which is the whole point: it is the thing that makes
+        // the model pick up where it stopped rather than asking what it was doing.
+        assertThat(client.last.messages()).extracting(Message::content)
+                .anyMatch(content -> content.contains("stage: execution")
+                        && content.contains("writing the migration script"));
+    }
+
+    @Test
+    void aStageTheTableForbidsIsRefusedAndTheJobStaysWhereItWas() {
+        // The extractor is told not to do this, but "told not to" is not a guarantee — it is a
+        // prompt. The table is the guarantee. Refusing costs one turn of an under-claimed stage;
+        // accepting would let a sentence promote itself into finished work.
+        client.extraction = "stage/stage: done";
+        agent.handle(C1, Persona.NONE, "I think that wraps it up", null);
+
+        assertThat(agent.task("c1").isPresent()).isFalse();
+        assertThat(agent.task("c1").stage()).isEqualTo(TaskStage.PLANNING);
+    }
+
+    @Test
+    void aPausedTaskRefusesTheTurnOutrightRatherThanAnsweringAndDecliningQuietly() {
+        // With no loop and no tools, answering is the only thing this agent does — so a pause that
+        // still answers pauses nothing the user can see. The refusal names the stage and the step
+        // so the page can offer the way back instead of reporting a dead end.
+        agent.moveTask(C1, TaskStage.EXECUTION);
+        agent.pauseTask(C1);
+        int callsBefore = client.calls;
+        int extractionsBefore = client.extractions;
+
+        assertThatThrownBy(() -> agent.handle(C1, Persona.NONE, "how far did we get?", null))
+                .isInstanceOf(TaskPausedException.class)
+                .hasMessageContaining("paused in execution");
+
+        // Refused before a byte leaves the process, and before the extractor call that rides along
+        // with every turn. A pause that still pays for two calls is a pause that saves nothing.
+        assertThat(client.calls).isEqualTo(callsBefore);
+        assertThat(client.extractions).isEqualTo(extractionsBefore);
+        // And nothing was recorded, so the transcript does not gain a question that was never asked.
+        assertThat(agent.transcript("c1")).isEmpty();
+        assertThat(agent.task("c1").stage()).isEqualTo(TaskStage.EXECUTION);
+        assertThat(agent.task("c1").paused()).isTrue();
+    }
+
+    @Test
+    void resumingLetsTheVeryNextMessageLandWithoutReplayingTheRefusedOne() {
+        agent.moveTask(C1, TaskStage.EXECUTION);
+        agent.pauseTask(C1);
+        assertThatThrownBy(() -> agent.handle(C1, Persona.NONE, "how far did we get?", null))
+                .isInstanceOf(TaskPausedException.class);
+
+        agent.resumeTask(C1);
+        client.extraction = "stage/stage: validation";
+        agent.handle(C1, Persona.NONE, "carry on", null);
+
+        assertThat(agent.task("c1").stage()).isEqualTo(TaskStage.VALIDATION);
+        assertThat(agent.task("c1").paused()).isFalse();
+        // The refused message is not resurrected — "carry on" is the first thing the model ever saw.
+        assertThat(agent.transcript("c1")).extracting(Message::content)
+                .containsExactly("carry on", "reply 1");
+    }
+
+    @Test
+    void anAsideIsAnsweredWhilePausedAndLeavesTheTaskExactlyWhereItWas() {
+        // A pause stops the work, not the conversation. Refusing every message would also refuse
+        // "what did we decide about the deadline?", which moves nothing and is not a resume.
+        client.extraction = """
+                stage/stage: execution
+                stage/step: drafting the migration""";
+        agent.handle(C1, Persona.NONE, "start on the migration", null);
+        agent.pauseTask(C1);
+
+        // The model tries to advance on the way past, as it would on any turn.
+        client.extraction = "stage/stage: validation";
+        AgentResult result = agent.handle(C1, Persona.NONE, "unrelated: what is our deadline?",
+                null, PausedTurn.ASIDE);
+
+        assertThat(result.answer()).isNotBlank();
+        // Answered and remembered — an aside is a real turn, which is the honest cost of it.
+        assertThat(agent.transcript("c1")).extracting(Message::content)
+                .endsWith("unrelated: what is our deadline?", result.answer());
+        // But the machine did not move, and is still paused, so Resume still lands where it was.
+        assertThat(agent.task("c1").stage()).isEqualTo(TaskStage.EXECUTION);
+        assertThat(agent.task("c1").step()).isEqualTo("drafting the migration");
+        assertThat(agent.task("c1").paused()).isTrue();
+    }
+
+    @Test
+    void anAsideOnAnUnpausedTaskIsJustAnOrdinaryTurn() {
+        // The flag says what to do about a pause, not whether to freeze one — a task that is
+        // running must not be quietly held still by which button happened to be clicked.
+        agent.moveTask(C1, TaskStage.EXECUTION);
+        client.extraction = "stage/stage: validation";
+
+        agent.handle(C1, Persona.NONE, "carry on", null, PausedTurn.ASIDE);
+
+        assertThat(agent.task("c1").stage()).isEqualTo(TaskStage.VALIDATION);
+    }
+
+    @Test
+    void aConversationWithNoTaskIsNeverPausedAndIsNotAffectedByTheGate() {
+        // The pause gate keys off a task that exists. A dialogue that never started one is the
+        // pre-machine flow, and it must not become unusable because a flag defaults to false.
+        agent.pauseTask(C1);
+
+        assertThat(agent.task("c1").isPresent()).isFalse();
+        assertThat(agent.handle(C1, Persona.NONE, "hello", null).answer()).isNotBlank();
+    }
+
+    @Test
+    void theExtractorIsShownWhereTheJobIsSoItCanTellWhetherTheMessageMovedIt() {
+        // Asked to propose a transition with no idea of the current state, the only honest answer
+        // is a guess. The brief carries the state for the same reason it carries the keys in use.
+        agent.moveTask(C1, TaskStage.EXECUTION);
+        agent.handle(C1, Persona.NONE, "done with the script", null);
+
+        assertThat(client.lastExtraction.messages().get(1).content()).contains("stage: execution");
+        // And the legal moves, so a refusal is a bug in the model rather than a gap in the brief.
+        assertThat(client.lastExtraction.messages().get(0).content()).contains("execution");
+    }
+
+    @Test
+    void aTaskCanOnlyBeClosedFromAStageThatLeadsToDone() {
+        // Finishing is a transition, not a label, so the button is bound by the same table as the
+        // model. Promoting from planning would write "what was agreed" out of a job where nothing
+        // has been built, let alone checked.
+        client.extraction = "decision/database: Postgres 16";
+        agent.handle(C1, Persona.NONE, "let's say Postgres 16", null);
+        agent.moveTask(C1, TaskStage.EXECUTION);
+
+        Agent.TaskClosure refused = agent.finishTask(C1);
+
+        assertThat(refused.closed()).isFalse();
+        assertThat(refused.why()).contains("execution").contains("done");
+        // Nothing moved and nothing was promoted — a refused close is not a partial one.
+        assertThat(agent.task("c1").stage()).isEqualTo(TaskStage.EXECUTION);
+        assertThat(agent.recall("c1").isPresent()).isFalse();
+        assertThat(agent.facts("c1").isPresent()).isTrue();
+
+        agent.moveTask(C1, TaskStage.VALIDATION);
+        Agent.TaskClosure closed = agent.finishTask(C1);
+
+        assertThat(closed.closed()).isTrue();
+        assertThat(closed.longTerm().entries()).extracting(LongTermMemory.Entry::key)
+                .containsExactly("database");
+        assertThat(agent.facts("c1").isPresent()).isFalse();
+        assertThat(agent.task("c1").isPresent()).isFalse();
+    }
+
+    @Test
+    void aConversationThatNeverStartedATaskCanStillBeClosed() {
+        // The machine governs jobs that have a state. One that never had a stage is the flow that
+        // existed before the machine did, and adding the machine must not take the button away.
+        client.extraction = "decision/database: Postgres 16";
+        agent.handle(C1, Persona.NONE, "let's say Postgres 16", null);
+
+        Agent.TaskClosure closure = agent.finishTask(C1);
+
+        assertThat(closure.closed()).isTrue();
+        assertThat(closure.longTerm().entries()).hasSize(1);
+    }
+
+    @Test
+    void startingANewTaskResetsTheMachineAsWellAsTheScratch() {
+        // Abandoning is not a transition — done is where a job ends, not where it is dropped. The
+        // reset has to clear the stage too, or the next job inherits the last one's position.
+        agent.moveTask(C1, TaskStage.VALIDATION);
+
+        agent.newTask(C1);
+
+        assertThat(agent.task("c1")).isEqualTo(TaskState.EMPTY);
+        assertThat(agent.task("c1").isPresent()).isFalse();
     }
 
     @Test

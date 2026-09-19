@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.tuple;
 
+import com.crispyland.agent.task.AwaitedFrom;
+import com.crispyland.agent.task.TaskStage;
+import com.crispyland.agent.task.TaskState;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -11,6 +14,7 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 /** Restarting the JVM is simulated by building a second store over the same file. */
@@ -133,6 +137,84 @@ class JsonFileConversationStoreTest {
         assertThat(restored.facts("c1").entries())
                 .containsExactly(new Facts.Fact("database", "Postgres 16", false));
         assertThat(restored.history("c1")).hasSize(1);
+    }
+
+    @Test
+    void aPausedTaskSurvivesTheRestartThatThePauseWasFor() {
+        // This is the day's requirement in one test: stop mid-job, kill the process, come back and
+        // still be in execution on the same step. A task state that lived only in memory would
+        // make "pause" mean "abandon", which is the opposite of what the button claims.
+        JsonFileConversationStore first = store(20);
+        first.append("c1", List.of(Message.user("let's do the migration")));
+        first.saveTask("c1", new TaskState(TaskStage.EXECUTION, "writing the migration script",
+                "review the script", AwaitedFrom.USER, true, 3));
+
+        assertThat(store(20).task("c1")).isEqualTo(new TaskState(TaskStage.EXECUTION,
+                "writing the migration script", "review the script", AwaitedFrom.USER, true, 3));
+    }
+
+    @Test
+    void theStageIsWrittenByNameSoReorderingTheEnumCannotRewriteHistory() throws IOException {
+        // An ordinal would mean that inserting a stage between planning and execution silently
+        // moves every stored task one step along. The name is the only stable identity an enum has.
+        JsonFileConversationStore first = store(20);
+        first.append("c1", List.of(Message.user("hello")));
+        first.saveTask("c1", new TaskState(TaskStage.VALIDATION, "checking", "",
+                AwaitedFrom.AGENT, false, 1));
+
+        JsonNode task = JsonMapper.builder().build().readTree(Files.readString(file))
+                .path("conversations").path("c1").path("task");
+
+        assertThat(task.path("stage").stringValue()).isEqualTo("validation");
+        assertThat(task.path("waiting").stringValue()).isEqualTo("agent");
+    }
+
+    @Test
+    void aConversationThatNeverStartedATaskRestoresWithNoTaskAtAll() {
+        // isPresent() is what the page and the prompt both branch on, so an empty task must not
+        // come back looking like a task that is sitting in planning.
+        store(20).append("c1", List.of(Message.user("hello")));
+
+        assertThat(store(20).task("c1")).isEqualTo(TaskState.EMPTY);
+        assertThat(store(20).task("c1").isPresent()).isFalse();
+    }
+
+    @Test
+    void aFileWrittenBeforeTasksExistedStillLoads() throws IOException {
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, """
+                {"conversations":{"c1":{"messages":[{"role":"user","content":"hello"}]}}}""");
+
+        assertThat(store(20).task("c1")).isEqualTo(TaskState.EMPTY);
+        assertThat(store(20).history("c1")).hasSize(1);
+    }
+
+    @Test
+    void aFullLengthForkInheritsTheTaskButAMidpointForkStartsClean() {
+        // Same rule as the facts, and for the same reason. A stage is not message-addressable:
+        // rewinding to message three cannot say which stage the job was in at the time, so a
+        // midpoint fork that inherited the stage would claim progress it has no record of.
+        JsonFileConversationStore first = store(20);
+        first.append("c1", List.of(Message.user("one"), Message.assistant("two"),
+                Message.user("three"), Message.assistant("four")));
+        first.saveTask("c1", new TaskState(TaskStage.EXECUTION, "step", "next",
+                AwaitedFrom.USER, false, 2));
+
+        first.copy("c1", "whole", 4);
+        first.copy("c1", "rewound", 2);
+
+        assertThat(first.task("whole").stage()).isEqualTo(TaskStage.EXECUTION);
+        assertThat(first.task("rewound")).isEqualTo(TaskState.EMPTY);
+    }
+
+    @Test
+    void clearingRemovesTheTaskAlongWithTheMessages() {
+        JsonFileConversationStore first = store(20);
+        first.append("c1", List.of(Message.user("hello")));
+        first.saveTask("c1", new TaskState(TaskStage.EXECUTION, "step", "", AwaitedFrom.USER, false, 1));
+        first.clear("c1");
+
+        assertThat(store(20).task("c1")).isEqualTo(TaskState.EMPTY);
     }
 
     @Test

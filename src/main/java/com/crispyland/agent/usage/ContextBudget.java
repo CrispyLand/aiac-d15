@@ -16,6 +16,10 @@ package com.crispyland.agent.usage;
  *       something the agent worked out, and the two fail in different ways</li>
  *   <li>{@code longTermTokens} — what is known about the user; survives this conversation</li>
  *   <li>{@code workingTokens} — the current task's block; dies with the task</li>
+ *   <li>{@code taskTokens} — where that task has got to. Counted inside the memory total, unlike
+ *       the profile: this one is the agent's own inference about the conversation, so "does it
+ *       change any answer, and is that worth what it costs every turn" is a fair question to ask
+ *       of it — which is exactly the question the memory total exists to make askable</li>
  *   <li>{@code summaryTokens} — short-term, compressed: the stand-in for turns already folded away</li>
  *   <li>{@code historyTokens} — short-term, verbatim: the part that grows turn by turn</li>
  *   <li>{@code inputTokens} — the new message, plus the request's framing overhead</li>
@@ -39,6 +43,7 @@ public record ContextBudget(
         long profileTokens,
         long longTermTokens,
         long workingTokens,
+        long taskTokens,
         long summaryTokens,
         long historyTokens,
         long inputTokens,
@@ -56,8 +61,8 @@ public record ContextBudget(
 
     /** The messages alone, before the provider's template is added — what was actually encoded. */
     public long countedTokens() {
-        return systemTokens + profileTokens + longTermTokens + workingTokens + summaryTokens
-                + historyTokens + inputTokens;
+        return systemTokens + profileTokens + longTermTokens + workingTokens + taskTokens
+                + summaryTokens + historyTokens + inputTokens;
     }
 
     /**
@@ -69,7 +74,7 @@ public record ContextBudget(
      * user asked for it, so its cost is theirs to decide on, not the agent's to justify.
      */
     public long memoryTokens() {
-        return longTermTokens + workingTokens + summaryTokens + historyTokens;
+        return longTermTokens + workingTokens + taskTokens + summaryTokens + historyTokens;
     }
 
     public boolean compressed() {
@@ -145,6 +150,10 @@ public record ContextBudget(
         return workingTokens > 0;
     }
 
+    public boolean hasTask() {
+        return taskTokens > 0;
+    }
+
     /** Width of each segment as a percentage of the window, for rendering the bar. */
     public int percentOfWindow(long tokens) {
         if (contextWindow <= 0) {
@@ -167,6 +176,10 @@ public record ContextBudget(
 
     public int workingPercent() {
         return percentOfWindow(workingTokens);
+    }
+
+    public int taskPercent() {
+        return percentOfWindow(taskTokens);
     }
 
     public int summaryPercent() {

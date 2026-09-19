@@ -13,6 +13,9 @@ import com.crispyland.agent.memory.MemoryLayer;
 import com.crispyland.agent.memory.MemoryState;
 import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.memory.Summary;
+import com.crispyland.agent.task.AwaitedFrom;
+import com.crispyland.agent.task.TaskStage;
+import com.crispyland.agent.task.TaskState;
 import com.crispyland.agent.usage.BpeTokenCounter;
 import com.crispyland.agent.usage.ContextBudget;
 import com.crispyland.agent.usage.OverflowPolicy;
@@ -248,6 +251,7 @@ class ContextPlannerTest {
                         new LongTermMemory.Entry(LongTermKind.PROFILE, "name", "Nur")), 24),
                 Summary.EMPTY.rewrittenAs("they argued about databases", 8, 400, 60),
                 Facts.EMPTY.updatedWith(List.of(new Facts.Fact("database", "Postgres 16")), 12, 90),
+                TaskState.EMPTY,
                 history(2));
 
         ContextPlanner.ContextPlan plan = planner(2000, OverflowPolicy.FAIL).plan(CONFIG, Persona.NONE, all, "hello");
@@ -268,6 +272,64 @@ class ContextPlannerTest {
         // sends the reader looking for the saving in the wrong layer.
         assertThat(budget.promptTokens()).isEqualTo(budget.systemTokens()
                 + budget.memoryTokens() + budget.inputTokens() + budget.overheadTokens());
+    }
+
+    @Test
+    void theTaskBlockIsSentLastOfTheBlocksBecauseItIsTheNewestThingTheModelIsTold() {
+        // Position is the argument. Everything above it is background or record; this is where the
+        // job actually is, so on a conflict it has to be the block the model read most recently.
+        // It also sits above the replayed tail, which stops the last six messages from reading as
+        // a more current account of the work than the state that was maintained deliberately.
+        MemoryState all = new MemoryState(
+                LongTermMemory.EMPTY.updatedWith(List.of(
+                        new LongTermMemory.Entry(LongTermKind.PROFILE, "name", "Nur")), 24),
+                Summary.EMPTY.rewrittenAs("they argued about databases", 8, 400, 60),
+                Facts.EMPTY.updatedWith(List.of(new Facts.Fact("database", "Postgres 16")), 12, 90),
+                new TaskState(TaskStage.EXECUTION, "writing the migration", "review it",
+                        AwaitedFrom.USER, false, 2),
+                history(2));
+
+        ContextPlanner.ContextPlan plan = planner(2000, OverflowPolicy.FAIL)
+                .plan(CONFIG, Persona.NONE, all, "hello");
+
+        assertThat(plan.messages().get(4).content())
+                .contains("stage: execution")
+                .contains("writing the migration")
+                // The two ways a resumed conversation wastes a turn, forbidden by name.
+                .contains("do not ask what you")
+                .contains("do not start over");
+        assertThat(plan.messages().get(5).role()).isEqualTo("user");
+    }
+
+    @Test
+    void theTaskBlockIsPricedAsMemoryBecauseTheAgentInferredIt() {
+        // Unlike the profile, which the user wrote and therefore is not the agent's to economise
+        // on, the task state is something the agent worked out — so it belongs inside the number
+        // that answers "is what I am remembering worth what it costs".
+        MemoryState withTask = MemoryState.of(new TaskState(TaskStage.VALIDATION,
+                "checking the migration", "confirm the row counts", AwaitedFrom.USER, false, 4),
+                history(2));
+
+        ContextBudget budget = planner(2000, OverflowPolicy.FAIL)
+                .plan(CONFIG, Persona.NONE, withTask, "hello").budget();
+
+        assertThat(budget.taskTokens()).isPositive();
+        assertThat(budget.hasTask()).isTrue();
+        assertThat(budget.memoryTokens())
+                .isEqualTo(budget.longTermTokens() + budget.workingTokens() + budget.taskTokens()
+                        + budget.summaryTokens() + budget.historyTokens());
+        assertThat(budget.promptTokens()).isEqualTo(budget.systemTokens()
+                + budget.memoryTokens() + budget.inputTokens() + budget.overheadTokens());
+    }
+
+    @Test
+    void aConversationWithNoTaskSendsNoTaskBlockAndIsChargedNothingForIt() {
+        ContextPlanner.ContextPlan plan = planner(2000, OverflowPolicy.FAIL)
+                .plan(CONFIG, Persona.NONE, MemoryState.of(TaskState.EMPTY, List.of()), "hello");
+
+        assertThat(plan.messages()).extracting(Message::role).containsExactly("system", "user");
+        assertThat(plan.budget().taskTokens()).isZero();
+        assertThat(plan.budget().hasTask()).isFalse();
     }
 
     @Test
@@ -303,6 +365,7 @@ class ContextPlannerTest {
                         new LongTermMemory.Entry(LongTermKind.PROFILE, "style", "long essays")), 24),
                 Summary.EMPTY.rewrittenAs("they argued about databases", 8, 400, 60),
                 Facts.EMPTY.updatedWith(List.of(new Facts.Fact("database", "Postgres 16")), 12, 90),
+                TaskState.EMPTY,
                 history(2));
 
         ContextPlanner.ContextPlan plan = planner(2000, OverflowPolicy.FAIL)

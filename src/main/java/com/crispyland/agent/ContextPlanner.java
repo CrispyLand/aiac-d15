@@ -6,6 +6,7 @@ import com.crispyland.agent.memory.MemoryState;
 import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.memory.Summary;
 import com.crispyland.agent.profile.Persona;
+import com.crispyland.agent.task.TaskState;
 import com.crispyland.agent.usage.BpeTokenCounter;
 import com.crispyland.agent.usage.ContextBudget;
 import com.crispyland.agent.usage.OverflowPolicy;
@@ -92,6 +93,7 @@ public class ContextPlanner {
         Message known = longTermMessage(state.longTerm());
         Message workingNote = workingMessage(state.working());
         Message recall = recallMessage(state.summary());
+        Message taskNote = taskMessage(state.task());
         Message userMessage = Message.user(input);
 
         long systemTokens = counter.count(system);
@@ -99,6 +101,7 @@ public class ContextPlanner {
         long longTermTokens = counter.count(known);
         long workingTokens = counter.count(workingNote);
         long summaryTokens = counter.count(recall);
+        long taskTokens = counter.count(taskNote);
         // The once-per-request reply priming rides along with the new message so that the
         // segments add up exactly to the estimated prompt.
         long inputTokens = counter.count(userMessage) + BpeTokenCounter.TOKENS_PER_REPLY;
@@ -117,7 +120,7 @@ public class ContextPlanner {
         int dropped = 0;
         if (policy == OverflowPolicy.TRIM) {
             long fixed = systemTokens + profileTokens + longTermTokens + workingTokens
-                    + summaryTokens + inputTokens + templateTokens + reserved;
+                    + summaryTokens + taskTokens + inputTokens + templateTokens + reserved;
             while (dropped < replayed.size() && fixed + historyTokens > window) {
                 historyTokens -= perMessage[dropped];
                 dropped++;
@@ -132,9 +135,9 @@ public class ContextPlanner {
         }
 
         ContextBudget budget = new ContextBudget(config.model(), window, systemTokens,
-                profileTokens, longTermTokens, workingTokens, summaryTokens, historyTokens,
-                inputTokens, templateTokens, reserved, dropped, state.summary().replacedTokens(),
-                overhead.calibrated(config.model()), warnAt);
+                profileTokens, longTermTokens, workingTokens, taskTokens, summaryTokens,
+                historyTokens, inputTokens, templateTokens, reserved, dropped,
+                state.summary().replacedTokens(), overhead.calibrated(config.model()), warnAt);
 
         // OFF deliberately sends anyway, so the provider's own rejection can be observed.
         if (budget.overflowing() && policy != OverflowPolicy.OFF) {
@@ -156,6 +159,9 @@ public class ContextPlanner {
         }
         if (recall != null) {
             messages.add(recall);
+        }
+        if (taskNote != null) {
+            messages.add(taskNote);
         }
         messages.addAll(replayed);
         messages.add(userMessage);
@@ -180,6 +186,7 @@ public class ContextPlanner {
                 counter.count(profileMessage(persona)),
                 counter.count(longTermMessage(state.longTerm())),
                 counter.count(workingMessage(state.working())),
+                counter.count(taskMessage(state.task())),
                 counter.count(recallMessage(state.summary())), historyTokens, 0L,
                 overhead.forModel(config.model()), reserved(config), 0,
                 state.summary().replacedTokens(),
@@ -245,6 +252,24 @@ public class ContextPlanner {
         return Message.system("Established facts about the task in hand, maintained across "
                 + "messages that are no longer included. Treat them as current and authoritative:\n"
                 + working.render());
+    }
+
+    /**
+     * Where the job is. Sent last of the blocks, immediately before the replayed transcript, and
+     * the position is the argument: it is the newest and most specific thing the model is told, so
+     * on a conflict with anything above it, it should be the one that wins.
+     * <p>
+     * The wording forbids the two failures that make a resumed conversation useless — asking what
+     * we were doing, and starting the job again — because both are what a model does when it is
+     * handed a transcript that stops mid-task with no note of where it stopped.
+     */
+    private static Message taskMessage(TaskState task) {
+        if (task == null || !task.isPresent()) {
+            return null;
+        }
+        return Message.system("Where this job has got to. Carry on from it: do not ask what you "
+                + "were doing, do not re-explain what is already settled, and do not start over:\n"
+                + task.render());
     }
 
     public OverflowPolicy policy() {

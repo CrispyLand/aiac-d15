@@ -1,5 +1,8 @@
 package com.crispyland.agent.memory;
 
+import com.crispyland.agent.task.AwaitedFrom;
+import com.crispyland.agent.task.TaskStage;
+import com.crispyland.agent.task.TaskState;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -33,6 +36,7 @@ public class JsonFileConversationStore implements ConversationStore {
     private final Map<String, List<Message>> conversations = new ConcurrentHashMap<>();
     private final Map<String, Summary> summaries = new ConcurrentHashMap<>();
     private final Map<String, Facts> facts = new ConcurrentHashMap<>();
+    private final Map<String, TaskState> tasks = new ConcurrentHashMap<>();
     private final ObjectMapper mapper;
     private final Path file;
     private final int maxMessages;
@@ -88,13 +92,29 @@ public class JsonFileConversationStore implements ConversationStore {
     }
 
     @Override
+    public TaskState task(String conversationId) {
+        return tasks.getOrDefault(conversationId, TaskState.EMPTY);
+    }
+
+    @Override
+    public void saveTask(String conversationId, TaskState updated) {
+        tasks.put(conversationId, updated);
+        flush();
+    }
+
+    @Override
     public int copy(String fromConversationId, String toConversationId, int messages) {
         List<Message> source = history(fromConversationId);
         List<Message> copied = Conversations.head(source, messages);
+        boolean whole = copied.size() == source.size();
         conversations.put(toConversationId, copied);
         summaries.put(toConversationId, summary(fromConversationId));
-        facts.put(toConversationId, (copied.size() == source.size())
-                ? facts(fromConversationId) : Facts.EMPTY);
+        facts.put(toConversationId, whole ? facts(fromConversationId) : Facts.EMPTY);
+        // Same rule as the facts, and for the same reason: a stage is not message-addressable, so
+        // a fork taken four messages back cannot be rewound to the stage the task was in then. A
+        // branch that starts in `validation` having validated nothing is worse than one that
+        // starts with no task at all.
+        tasks.put(toConversationId, whole ? task(fromConversationId) : TaskState.EMPTY);
         flush();
         return copied.size();
     }
@@ -104,6 +124,7 @@ public class JsonFileConversationStore implements ConversationStore {
         conversations.remove(conversationId);
         summaries.remove(conversationId);
         facts.remove(conversationId);
+        tasks.remove(conversationId);
         flush();
     }
 
@@ -130,6 +151,12 @@ public class JsonFileConversationStore implements ConversationStore {
                 JsonNode stickyFacts = entry.path("facts");
                 if (stickyFacts.isObject()) {
                     facts.put(id, readFacts(stickyFacts));
+                }
+                // Absent for every file written before task state existed, and for every
+                // conversation that never started one. Both read as "no task", which is true.
+                JsonNode task = entry.path("task");
+                if (task.isObject()) {
+                    tasks.put(id, readTask(task));
                 }
             });
             log.info("Restored {} conversation(s) from {}", conversations.size(), file.toAbsolutePath());
@@ -174,6 +201,10 @@ public class JsonFileConversationStore implements ConversationStore {
             Facts stickyFacts = facts.get(id);
             if (stickyFacts != null && stickyFacts.isPresent()) {
                 writeFacts(entry.putObject("facts"), stickyFacts);
+            }
+            TaskState task = tasks.get(id);
+            if (task != null && task.isPresent()) {
+                writeTask(entry.putObject("task"), task);
             }
             ArrayNode array = entry.putArray("messages");
             for (Message message : messages) {
@@ -227,6 +258,36 @@ public class JsonFileConversationStore implements ConversationStore {
                     flag(entry.path("settled"))));
         }
         return new Facts(entries, (int) number(node.path("revision")), number(node.path("buildTokens")));
+    }
+
+    /**
+     * The stage is written by its id rather than its ordinal. Ordinals are a promise never to
+     * reorder the enum, and this one is ordered to read as a pipeline — the first thing anybody
+     * would do to it is insert a stage in the middle, which would silently move every stored task
+     * one step along.
+     */
+    private static void writeTask(ObjectNode node, TaskState task) {
+        node.put("stage", task.stage().id());
+        node.put("step", task.step());
+        node.put("next", task.next());
+        node.put("waiting", task.awaiting().id());
+        node.put("paused", task.paused());
+        node.put("revision", task.revision());
+    }
+
+    /**
+     * An unreadable stage restores as {@code PLANNING} rather than refusing the whole conversation.
+     * Losing a stage costs one correction; losing the transcript it belongs to costs the dialogue.
+     */
+    private static TaskState readTask(JsonNode node) {
+        TaskStage stage = TaskStage.from(text(node.path("stage")));
+        return new TaskState(
+                (stage == null) ? TaskStage.PLANNING : stage,
+                text(node.path("step")),
+                text(node.path("next")),
+                AwaitedFrom.from(text(node.path("waiting"))),
+                flag(node.path("paused")),
+                (int) number(node.path("revision")));
     }
 
     private static void writeStats(ObjectNode node, MessageStats stats) {

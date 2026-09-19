@@ -1,5 +1,6 @@
 package com.crispyland.agent.memory;
 
+import com.crispyland.agent.task.TaskState;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -13,6 +14,7 @@ public class InMemoryConversationStore implements ConversationStore {
     private final Map<String, List<Message>> conversations = new ConcurrentHashMap<>();
     private final Map<String, Summary> summaries = new ConcurrentHashMap<>();
     private final Map<String, Facts> facts = new ConcurrentHashMap<>();
+    private final Map<String, TaskState> tasks = new ConcurrentHashMap<>();
     private final int maxMessages;
 
     /** @param maxMessages rolling window size; {@code <= 0} keeps everything */
@@ -57,13 +59,28 @@ public class InMemoryConversationStore implements ConversationStore {
     }
 
     @Override
+    public TaskState task(String conversationId) {
+        return tasks.getOrDefault(conversationId, TaskState.EMPTY);
+    }
+
+    @Override
+    public void saveTask(String conversationId, TaskState updated) {
+        tasks.put(conversationId, updated);
+    }
+
+    @Override
     public int copy(String fromConversationId, String toConversationId, int messages) {
         List<Message> source = history(fromConversationId);
         List<Message> copied = Conversations.head(source, messages);
+        boolean whole = copied.size() == source.size();
         conversations.put(toConversationId, copied);
         summaries.put(toConversationId, summary(fromConversationId));
-        facts.put(toConversationId, (copied.size() == source.size())
-                ? facts(fromConversationId) : Facts.EMPTY);
+        facts.put(toConversationId, whole ? facts(fromConversationId) : Facts.EMPTY);
+        // Same rule as the facts, and for the same reason: a stage is not message-addressable, so
+        // a fork taken four messages back cannot be rewound to the stage the task was in then. A
+        // branch that starts in `validation` having validated nothing is worse than one that
+        // starts with no task at all.
+        tasks.put(toConversationId, whole ? task(fromConversationId) : TaskState.EMPTY);
         return copied.size();
     }
 
@@ -72,5 +89,6 @@ public class InMemoryConversationStore implements ConversationStore {
         conversations.remove(conversationId);
         summaries.remove(conversationId);
         facts.remove(conversationId);
+        tasks.remove(conversationId);
     }
 }

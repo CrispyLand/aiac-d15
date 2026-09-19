@@ -1,5 +1,6 @@
 package com.crispyland.agent.memory;
 
+import com.crispyland.agent.task.TaskState;
 import java.util.List;
 
 /**
@@ -29,6 +30,19 @@ public interface ConversationStore {
      * leaving the facts tab costs nothing and loses nothing.
      */
     void saveFacts(String conversationId, Facts facts);
+
+    /**
+     * Where the task in hand has got to. Never null; {@link TaskState#EMPTY} until one starts.
+     * <p>
+     * Kept beside the facts rather than in a store of its own because it has working memory's
+     * scope <em>and</em> its lifetime: same branch, same task, discarded at the same moment. What
+     * makes it a separate value rather than another fact is that it answers "where are we" instead
+     * of "what do we know", and only one of those has legal moves.
+     */
+    TaskState task(String conversationId);
+
+    /** Replaces the task state wholesale. Touches no messages and no facts. */
+    void saveTask(String conversationId, TaskState task);
 
     /** Appends messages to the stack, applying whatever retention policy the store has. */
     void append(String conversationId, List<Message> messages);

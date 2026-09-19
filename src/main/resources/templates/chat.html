@@ -160,6 +160,25 @@
         .keep[disabled] { opacity: .45; cursor: default; }
         .agreed { color: #2b8a3e; font-weight: 700; font-size: 10px;
                   letter-spacing: .04em; text-transform: uppercase; }
+        /* The state machine. Blue rather than green: it is beside working memory, not part of it —
+           it says where the job is, not what the job established. */
+        .fsm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+               margin: -8px 0 18px; font-size: 12px; color: var(--muted); }
+        .stage { background: #eceef1; border: 1px solid var(--line); border-radius: 999px;
+                 padding: 5px 12px; font-weight: 600; }
+        .stage.on { background: #e7f5ff; border-color: #4dabf7; color: #1971c2; }
+        .stage.was { opacity: .55; }
+        .stage.held { background: #fff4e6; border-color: #ffc078; color: #e8590c; }
+        .arrow { opacity: .45; }
+        .move { background: transparent; border: 1px solid #4dabf7; color: #1971c2;
+                border-radius: 6px; padding: 5px 12px; font-size: 12px; font-weight: 600; }
+        .move:hover { background: #e7f5ff; }
+        .await { font-weight: 600; }
+        .await.you { color: #e8590c; }
+        .fsm .what { color: var(--muted); font-weight: 400; }
+        .notice { border-color: #b2e7c0; background: #ebfbee; color: #2b8a3e; }
+        /* Amber, not red: the move was declined, nothing broke. */
+        .refused { border-color: #ffd8a8; background: #fff4e6; color: #d9480f; }
         .turnhead .fork { visibility: hidden; }
         .turn:hover .fork { visibility: visible; }
 
@@ -181,6 +200,7 @@
         .seg.sum { background: #0ca678; }
         .seg.lt { background: #ae3ec9; }
         .seg.facts { background: #2f9e44; }
+        .seg.task { background: #4dabf7; }
         .seg.hist { background: #3b5bdb; }
         .seg.input { background: #22b8cf; }
         .seg.tmpl { background: #f76707; }
@@ -331,9 +351,48 @@
                     : 'Move the agreed lines into long-term memory and clear the rest.'">
             Finish task &amp; keep what was agreed
         </button>
-        <button type="submit" form="newTaskForm" class="ghost" th:disabled="${!facts.present}"
-                title="Throw working memory away without promoting any of it. The dialogue and what is known about you are untouched.">
+        <button type="submit" form="newTaskForm" class="ghost"
+                th:disabled="${!facts.present and !task.present}"
+                title="Throw working memory and the task's stage away without promoting any of it. The dialogue and what is known about you are untouched.">
             New task
+        </button>
+    </div>
+
+    <!-- The state machine, shown as the pipeline it is. The stages ahead are drawn as well as the
+         one the task is in, because "planning → execution → validation" only reads as a machine
+         when you can see where it goes next; a single label reads as a mood.
+
+         The move buttons are generated from the transition table itself, so what the page offers
+         and what the machine allows cannot drift. `done` is never among them: closing is the
+         Finish button, because closing writes to memory that every branch reads. -->
+    <div class="fsm" th:if="${task.present}">
+        <span>state</span>
+        <th:block th:each="s, i : ${T(com.crispyland.agent.task.TaskStage).values()}">
+            <span class="arrow" th:unless="${i.first}">→</span>
+            <span class="stage"
+                  th:classappend="${s.name() == task.stage.name()} ? (${task.paused} ? 'held' : 'on')
+                                  : (${s.ordinal() < task.stage.ordinal()} ? 'was' : '')"
+                  th:text="${s.id()}">planning</span>
+        </th:block>
+
+        <span class="what" th:if="${!task.step.empty}" th:text="'· ' + ${task.step}"></span>
+
+        <span th:if="${task.paused}" class="await" style="color:#e8590c">
+            · paused — nothing advances until you resume</span>
+        <span th:unless="${task.paused}" th:if="${!task.next.empty}"
+              class="await" th:classappend="${task.waitingOnUser} ? 'you'"
+              th:text="'· ' + ${task.awaiting.label()} + ': ' + ${task.next}"></span>
+
+        <button th:each="s : ${taskMoves}" type="submit" form="stageForm" name="stage"
+                class="move" th:value="${s.id()}"
+                th:title="'Move the task to ' + ${s.id()} + ' — ' + ${s.what()}"
+                th:text="'→ ' + ${s.id()}">→ execution</button>
+
+        <button th:if="${task.paused}" type="submit" form="resumeTaskForm" class="move"
+                title="Carry on from exactly where this stopped.">Resume</button>
+        <button th:unless="${task.paused}" type="submit" form="pauseTaskForm" class="ghost"
+                title="Stop here. The state is on disk, so you can close the tab or restart the app and pick this up unchanged.">
+            Pause
         </button>
     </div>
 
@@ -500,6 +559,7 @@
                 <span class="seg lt" th:style="'width:' + ${budget.longTermPercent} + '%'"></span>
                 <span class="seg facts" th:style="'width:' + ${budget.workingPercent} + '%'"></span>
                 <span class="seg sum" th:style="'width:' + ${budget.summaryPercent} + '%'"></span>
+                <span class="seg task" th:style="'width:' + ${budget.taskPercent} + '%'"></span>
                 <span class="seg hist" th:style="'width:' + ${budget.historyPercent} + '%'"></span>
                 <span class="seg input" th:style="'width:' + ${budget.inputPercent} + '%'"></span>
                 <span class="seg tmpl" th:style="'width:' + ${budget.overheadPercent} + '%'"></span>
@@ -518,6 +578,8 @@
                       <b th:text="${#numbers.formatInteger(budget.workingTokens, 1, 'COMMA')}">0</b></span>
                 <span th:if="${budget.compressed}"><i style="background:#0ca678"></i>summary
                       <b th:text="${#numbers.formatInteger(budget.summaryTokens, 1, 'COMMA')}">0</b></span>
+                <span th:if="${budget.hasTask}"><i style="background:#4dabf7"></i>task state
+                      <b th:text="${#numbers.formatInteger(budget.taskTokens, 1, 'COMMA')}">0</b></span>
                 <span><i style="background:#3b5bdb"></i>history
                       <b th:text="${#numbers.formatInteger(budget.historyTokens, 1, 'COMMA')}">0</b></span>
                 <span th:if="${budget.inputTokens > 0}"><i style="background:#22b8cf"></i>new message
@@ -588,11 +650,36 @@
     <form id="switchForm" method="post" action="/branch/switch"></form>
     <form id="forkForm" method="post" action="/branch/fork"></form>
     <form id="finishTaskForm" method="post" action="/task/finish"></form>
+    <form id="stageForm" method="post" action="/task/stage"></form>
+    <form id="pauseTaskForm" method="post" action="/task/pause"></form>
+    <form id="resumeTaskForm" method="post" action="/task/resume"></form>
     <form id="newTaskForm" method="post" action="/task/new"
           onsubmit="return confirm('Discard working memory, including anything agreed? The dialogue and long-term memory stay.');"></form>
     <form id="forgetForm" method="post" action="/memory/forget"></form>
     <form id="forgetAllForm" method="post" action="/memory/forget-all"
           onsubmit="return confirm('Delete everything remembered about you, every branch, and the id itself? This cannot be undone.');"></form>
+
+    <div class="card notice" th:if="${notice}">
+        <div th:text="${notice}"></div>
+    </div>
+
+    <div class="card refused" th:if="${refused}">
+        <h2>The machine would not allow that move</h2>
+        <div th:text="${refused}"></div>
+    </div>
+
+    <!-- The message is still in the box, so both buttons re-post it rather than making you retype
+         it. Two of them because a pause stops the work, not the conversation: "carry on" and "what
+         did we decide about the deadline?" both land here, and only you know which one this was. -->
+    <div class="card refused" th:if="${paused}">
+        <h2>Paused — your message was not sent</h2>
+        <div th:text="${paused}"></div>
+        <button type="submit" form="askForm" name="whenPaused" value="resume">Resume and send</button>
+        <button type="submit" form="askForm" name="whenPaused" value="aside" class="ghost"
+                title="Answers this one with the task left exactly where it is. It still costs a turn and still joins the history — only the state machine is frozen.">
+            Send anyway, stay paused
+        </button>
+    </div>
 
     <div class="card error" th:if="${error}">
         <h2>Something went wrong</h2>

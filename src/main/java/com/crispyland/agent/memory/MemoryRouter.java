@@ -1,7 +1,9 @@
 package com.crispyland.agent.memory;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,21 +39,28 @@ public class MemoryRouter {
      *
      * @param working  lines destined for the task's key/value block, settled ones flagged
      * @param longTerm lines destined for the visitor's permanent record
+     * @param stage    lines describing where the job stands, as {@code field → value}. Not routed
+     *                 to a store at all: they are a <em>proposal</em>, and the state machine is
+     *                 free to refuse them. Kept as raw fields rather than assembled here because
+     *                 this class decides destinations, and whether a proposed move is legal is not
+     *                 a destination question
      * @param dropped  lines whose tag was not recognised and which were therefore kept nowhere
      */
     public record Routed(List<Facts.Fact> working, List<LongTermMemory.Entry> longTerm,
-                         List<Line> dropped) {
+                         Map<String, String> stage, List<Line> dropped) {
 
-        public static final Routed NOTHING = new Routed(List.of(), List.of(), List.of());
+        public static final Routed NOTHING =
+                new Routed(List.of(), List.of(), Map.of(), List.of());
 
         public Routed {
             working = List.copyOf(working);
             longTerm = List.copyOf(longTerm);
+            stage = Map.copyOf(stage);
             dropped = List.copyOf(dropped);
         }
 
         public boolean isEmpty() {
-            return working.isEmpty() && longTerm.isEmpty();
+            return working.isEmpty() && longTerm.isEmpty() && stage.isEmpty();
         }
     }
 
@@ -69,6 +78,7 @@ public class MemoryRouter {
         }
         List<Facts.Fact> working = new ArrayList<>();
         List<LongTermMemory.Entry> longTerm = new ArrayList<>();
+        Map<String, String> stage = new LinkedHashMap<>();
         List<Line> dropped = new ArrayList<>();
 
         for (Line line : lines) {
@@ -78,6 +88,12 @@ public class MemoryRouter {
                 log.warn("Dropped an extracted line tagged '{}' ({}) — not one of the {} tags the "
                                 + "router routes, and nothing is filed on a guess.",
                         line.tag(), line.key(), MemoryTag.values().length);
+                continue;
+            }
+            // Where the job stands, which is not a lifetime question and so has no layer. Passed
+            // through unjudged: this class sorts, the state machine decides what is a legal move.
+            if (tag.isTaskState()) {
+                stage.put(line.key(), line.value());
                 continue;
             }
             // NONE is a real answer, not a failure: the model read the message and found nothing
@@ -96,6 +112,6 @@ public class MemoryRouter {
                 case SHORT_TERM -> dropped.add(line);
             }
         }
-        return new Routed(working, longTerm, dropped);
+        return new Routed(working, longTerm, stage, dropped);
     }
 }

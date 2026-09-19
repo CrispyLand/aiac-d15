@@ -7,6 +7,7 @@ import com.crispyland.agent.AgentProperties;
 import com.crispyland.agent.AgentResult;
 import com.crispyland.agent.Branches;
 import com.crispyland.agent.ContextOverflowException;
+import com.crispyland.agent.TaskPausedException;
 import com.crispyland.agent.memory.LongTermKind;
 import com.crispyland.agent.memory.LongTermStore;
 import com.crispyland.agent.memory.MemoryLayer;
@@ -15,6 +16,9 @@ import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.profile.Persona;
 import com.crispyland.agent.profile.PersonaSelector;
 import com.crispyland.agent.profile.Profiles;
+import com.crispyland.agent.task.PausedTurn;
+import com.crispyland.agent.task.TaskStage;
+import com.crispyland.agent.task.TaskState;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.util.List;
@@ -25,6 +29,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.servlet.mvc.support.RedirectAttributes;
 
 /**
  * Thin by design: render the page, turn form fields into an AgentConfig, call the agent,
@@ -77,8 +82,17 @@ public class ChatController {
         return "chat";
     }
 
+    /**
+     * @param whenPaused which of the two buttons on the paused notice was clicked, so the message
+     *        that was refused can be sent by the same click that decides what to do about the
+     *        pause: {@code resume} lifts it, {@code aside} answers with the task left frozen.
+     *        One named parameter rather than two booleans, because they are two answers to one
+     *        question and no click means both. Kept off {@link ChatForm} on purpose: everything
+     *        in there becomes an {@code AgentConfig}, and this is a one-shot action, not a setting.
+     */
     @PostMapping("/")
-    public String ask(@ModelAttribute("form") ChatForm form, BindingResult binding, Model model,
+    public String ask(@ModelAttribute("form") ChatForm form, BindingResult binding,
+                      @RequestParam(required = false) String whenPaused, Model model,
                       HttpServletRequest request, HttpServletResponse response) {
         MemoryScope scope = scope(request, response);
         addBranches(model, scope.visitor());
@@ -99,13 +113,28 @@ public class ChatController {
             return "chat";
         }
 
+        // Lifted before the turn, not after: resuming and sending are one intention, and making
+        // them two clicks means the refused message has to be typed again. "resume" is spelled
+        // out here rather than passed down because it changes the task, which outlives the turn;
+        // an aside changes nothing, so it travels as an argument to the turn itself.
+        if ("resume".equalsIgnoreCase(whenPaused)) {
+            agent.resumeTask(scope);
+        }
+
         try {
-            AgentResult result = agent.handle(scope, persona, form.userInput(), form.toAgentConfig());
+            AgentResult result = agent.handle(scope, persona, form.userInput(), form.toAgentConfig(),
+                    PausedTurn.from(whenPaused));
             model.addAttribute("result", result);
             addMemory(model, scope, result.transcript());
             model.addAttribute("budget", agent.budget(scope, persona, result.effectiveConfig()));
             // Keep the settings the agent actually used, but clear the box for the next turn.
             model.addAttribute("form", ChatForm.of("", result.effectiveConfig(), form.selectedLens()));
+        } catch (TaskPausedException e) {
+            // Not an error, and deliberately not silent. The typed message is still in the box
+            // because this branch leaves the bound form alone, so "Resume and send" re-posts it.
+            model.addAttribute("paused", e.getMessage());
+            addMemory(model, scope, agent.transcript(scope.conversation()));
+            model.addAttribute("budget", agent.budget(scope, persona, form.toAgentConfig()));
         } catch (ContextOverflowException e) {
             // Show the budget that caused the refusal, not the one the dialogue merely sits at.
             model.addAttribute("error", e.getMessage());
@@ -170,8 +199,52 @@ public class ChatController {
      * Asking the person who actually knows costs one click.
      */
     @PostMapping("/task/finish")
-    public String finishTask(HttpServletRequest request, HttpServletResponse response) {
-        agent.finishTask(scope(request, response));
+    public String finishTask(HttpServletRequest request, HttpServletResponse response,
+                             RedirectAttributes redirect) {
+        Agent.TaskClosure closure = agent.finishTask(scope(request, response));
+        // The refusal has to reach the page. A button that promotes nothing and says nothing is
+        // indistinguishable from one that worked, which is the failure mode this whole feature
+        // exists to prevent. It does not go in the error card, though: the machine declining a move
+        // it was never going to allow is the feature working, and dressing that up as a fault sends
+        // the reader hunting for a bug instead of reading the legal moves they were just handed.
+        redirect.addFlashAttribute(closure.closed() ? "notice" : "refused", closure.why());
+        return "redirect:/";
+    }
+
+    /**
+     * Moves the task by hand, through the same transition table the model is held to.
+     * <p>
+     * Deliberately not a way around the machine. The person is trusted with <em>authority</em> —
+     * they may close a task, the model may not — but an illegal move is still illegal, because a
+     * table that only binds the model is not the machine's table, it is a prompt.
+     */
+    @PostMapping("/task/stage")
+    public String moveTask(@RequestParam(required = false) String stage,
+                           HttpServletRequest request, HttpServletResponse response) {
+        agent.moveTask(scope(request, response), TaskStage.from(stage));
+        return "redirect:/";
+    }
+
+    /**
+     * Stops the task where it stands, without ending it.
+     * <p>
+     * The state is on disk, so this survives closing the tab and restarting the process — which is
+     * the only honest way to demonstrate that resuming does not depend on anything still being in
+     * the conversation. While it is paused the turn is refused outright — nothing is sent, nothing
+     * is charged, and the page says so and offers the way back. An earlier version answered anyway
+     * and only declined the state change, which put the refusal in the log and nowhere the user
+     * would look; with no tools and no loop, answering is the only thing this agent does, so a
+     * pause that still answers is not a pause.
+     */
+    @PostMapping("/task/pause")
+    public String pauseTask(HttpServletRequest request, HttpServletResponse response) {
+        agent.pauseTask(scope(request, response));
+        return "redirect:/";
+    }
+
+    @PostMapping("/task/resume")
+    public String resumeTask(HttpServletRequest request, HttpServletResponse response) {
+        agent.resumeTask(scope(request, response));
         return "redirect:/";
     }
 
@@ -269,6 +342,12 @@ public class ChatController {
     private void addMemory(Model model, MemoryScope scope, List<Message> transcript) {
         model.addAttribute("transcript", transcript);
         model.addAttribute("turns", TurnCost.series(transcript));
+        // The stage and the moves available from it, so the buttons on the page are the transition
+        // table rather than a second copy of it that can disagree.
+        TaskState task = agent.task(scope.conversation());
+        model.addAttribute("task", task);
+        model.addAttribute("taskMoves", task.stage().moves().stream()
+                .filter(stage -> stage != task.stage() && !stage.requiresHuman()).toList());
         // The head of the dialogue that no longer exists as messages — rendered above them so
         // the page shows the whole conversation, compressed part included.
         model.addAttribute("summary", agent.summary(scope.conversation()));

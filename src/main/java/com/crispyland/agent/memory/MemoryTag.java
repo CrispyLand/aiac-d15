@@ -11,9 +11,10 @@ import java.util.Locale;
  * lifetime of a piece of memory a thing a language model improvises per turn, which is fine until
  * the turn it improvises differently.
  * <p>
- * Note that the four tags map onto three layers, not four. {@link #TASK} and {@link #DECISION}
- * both land in working memory; they differ only in what happens when the task closes, which is
- * the one piece of routing that is not a straight lookup — see {@link #promoteAs()}.
+ * The tags do not map one-to-one onto layers. {@link #TASK} and {@link #DECISION} both land in
+ * working memory, differing only in what happens when the task closes — the one piece of routing
+ * that is not a straight lookup, see {@link #promoteAs()}. {@link #STAGE} lands in no layer at
+ * all: it describes the job rather than adding to what is known, and goes to the state machine.
  */
 public enum MemoryTag {
 
@@ -40,6 +41,21 @@ public enum MemoryTag {
     /** Durable facts about the user's world, as distinct from the task in front of them. */
     KNOWLEDGE("knowledge", MemoryLayer.LONG_TERM, LongTermKind.KNOWLEDGE,
             "durable facts about their world that outlast this task"),
+
+    /**
+     * Where the job itself stands — not a memory layer at all, and the one tag here that is
+     * routed to the state machine instead of to a store.
+     * <p>
+     * It rides this call rather than getting one of its own because the question "did that message
+     * move the task on?" needs the same sentence in front of you that the memory questions do, and
+     * a second call would double the per-turn request count against an 8k tokens-per-minute ceiling
+     * to re-read text this one already has.
+     * <p>
+     * Being in this enum is also what keeps the extractor's tag menu honest: the menu is generated
+     * from these values, so a tag the prompt offers is by construction a tag something handles.
+     */
+    STAGE("stage", null, null,
+            "where the JOB stands and what is being done about it, as opposed to what is known"),
 
     /**
      * Explicitly nothing. Having a name for "I read this and there is nothing to keep" is what
@@ -81,6 +97,18 @@ public enum MemoryTag {
     /** True when this line waits in working memory for the task to close before being kept. */
     public boolean heldUntilTaskCloses() {
         return destination == MemoryLayer.WORKING && promoteAs != null;
+    }
+
+    /**
+     * True for the one tag that describes the task rather than adds to what is remembered.
+     * <p>
+     * Distinct from {@link #NONE} even though both have no {@link #destination()}: NONE means there
+     * is nothing to do with the line, whereas this means there is something to do with it somewhere
+     * that is not a memory layer. Collapsing them would make every stage line the model emits
+     * disappear into the same silent branch that discards a message about the weather.
+     */
+    public boolean isTaskState() {
+        return this == STAGE;
     }
 
     /** What the extractor is told this tag means — the prompt and the UI read the same text. */

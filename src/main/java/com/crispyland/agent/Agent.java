@@ -21,12 +21,16 @@ import com.crispyland.agent.memory.MessageStats;
 import com.crispyland.agent.memory.Summary;
 import com.crispyland.agent.policy.InputPolicy;
 import com.crispyland.agent.policy.OutputPolicy;
+import com.crispyland.agent.task.PausedTurn;
+import com.crispyland.agent.task.TaskStage;
+import com.crispyland.agent.task.TaskState;
 import com.crispyland.agent.usage.ContextBudget;
 import com.crispyland.agent.usage.TemplateOverhead;
 import com.crispyland.agent.usage.TokenUsage;
 import com.crispyland.agent.usage.TokenUsageTracker;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -104,6 +108,18 @@ public class Agent {
      *         hold the call, or the provider fails
      */
     public AgentResult handle(MemoryScope scope, Persona persona, String userInput, AgentConfig config) {
+        return handle(scope, persona, userInput, config, PausedTurn.REFUSE);
+    }
+
+    /**
+     * The same turn, with a say in what a paused task does to it.
+     *
+     * @param whenPaused {@link PausedTurn#ASIDE} lets a message unrelated to the task through
+     *        while leaving the task frozen. It is a separate argument rather than something read
+     *        off the message because only the person sending it knows whether it is an aside.
+     */
+    public AgentResult handle(MemoryScope scope, Persona persona, String userInput,
+                              AgentConfig config, PausedTurn whenPaused) {
         MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
         Persona who = (persona == null) ? Persona.NONE : persona;
         String id = where.conversation();
@@ -111,12 +127,27 @@ public class Agent {
 
         String prompt = inputPolicy.apply(userInput);
 
+        // Ahead of every call, including the two this turn would make before the answer: a paused
+        // task refuses the turn outright rather than answering and silently declining to move.
+        // Deciding per message would cost the very calls the pause exists to stop. An aside is
+        // let through here and frozen further in, by the refusal in TaskState.apply.
+        TaskState paused = conversations.task(id);
+        boolean aside = paused.isPresent() && paused.paused();
+        if (aside && whenPaused != PausedTurn.ASIDE) {
+            throw new TaskPausedException(paused);
+        }
+        if (aside) {
+            log.info("Aside on a task paused in {} — answered, but the task does not move.",
+                    paused.stage().id());
+        }
+
         // Before pricing, not after: the whole point is that this turn is the one that gets
         // cheaper, and the budget the caller is shown has to be the budget that was spent.
         int compacted = compressIfDue(id);
-        Facts working = updateMemory(where, prompt);
+        updateMemory(where, prompt);
         MemoryState memory = new MemoryState(longTerm.recall(where.visitor()),
-                conversations.summary(id), working, conversations.history(id));
+                conversations.summary(id), conversations.facts(id), conversations.task(id),
+                conversations.history(id));
         List<Message> history = memory.recent();
 
         // Priced before a byte leaves the process: an oversized prompt is billed as a
@@ -218,7 +249,7 @@ public class Agent {
         MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
         String id = where.conversation();
         return new MemoryState(longTerm.recall(where.visitor()), conversations.summary(id),
-                conversations.facts(id), conversations.history(id));
+                conversations.facts(id), conversations.task(id), conversations.history(id));
     }
 
     /**
@@ -233,23 +264,27 @@ public class Agent {
      * Same bargain as compression: an extraction failure costs one turn of forgetfulness, never
      * the turn itself. A user asking a question does not deserve an error because a background
      * bookkeeping call timed out.
-     *
-     * @return the working block as it now stands, which is the one the prompt will carry
+     * <p>
+     * The same call also carries the task's own stage, which is why this method has stopped
+     * returning just the fact block. One reading of the message serves both questions — what did
+     * it establish, and did it move the job on — and splitting them into two calls would double
+     * the per-turn request count to re-read text this one already has.
      */
-    private Facts updateMemory(MemoryScope where, String prompt) {
+    private void updateMemory(MemoryScope where, String prompt) {
         String id = where.conversation();
         Facts current = conversations.facts(id);
 
         MemoryExtractor.Extraction extraction;
         try {
-            extraction = extractor.extract(prompt, keysInUse(current, longTerm.recall(where.visitor())));
+            extraction = extractor.extract(prompt,
+                    keysInUse(current, longTerm.recall(where.visitor())), conversations.task(id));
         } catch (AgentException e) {
             log.warn("Memory extraction failed ({}) — continuing with the layers as they stand.",
                     e.getMessage());
-            return current;
+            return;
         }
         if (extraction.isEmpty()) {
-            return current;
+            return;
         }
 
         MemoryRouter.Routed routed = router.route(extraction.lines());
@@ -271,7 +306,41 @@ public class Agent {
             log.info("Long-term memory rev {} — {} entry(ies) now known about this visitor",
                     kept.revision(), kept.size());
         }
-        return updated;
+
+        applyProposedMove(id, TaskState.Proposal.from(routed.stage()), TaskState.Authority.MODEL);
+    }
+
+    /**
+     * Puts a proposed move to the machine and saves it if it is allowed.
+     * <p>
+     * A refusal is logged at WARN and nothing else happens. That is the loudest the disagreement
+     * should get: the model's idea of where the task is has drifted from the machine's, which is
+     * worth knowing about and is not worth failing a user's turn over. The machine stays where it
+     * was, which is the safe side of the disagreement — an unmoved task under-claims progress,
+     * whereas an illegally moved one claims work that was never done.
+     */
+    private TaskState applyProposedMove(String id, TaskState.Proposal proposal,
+                                        TaskState.Authority by) {
+        TaskState current = conversations.task(id);
+        TaskState.Transition transition = current.apply(proposal, by);
+
+        if (transition.refused()) {
+            log.warn("Refused a {} task transition — {}. The task stays in {}.",
+                    by.name().toLowerCase(Locale.ROOT), transition.why(), current.stage().id());
+            return current;
+        }
+        if (!transition.moved()) {
+            return current;
+        }
+        conversations.saveTask(id, transition.state());
+        log.info("Task rev {} — {} (step: {}, next: {} from the {})", transition.state().revision(),
+                transition.why(), blankAsDash(transition.state().step()),
+                blankAsDash(transition.state().next()), transition.state().awaiting().id());
+        return transition.state();
+    }
+
+    private static String blankAsDash(String value) {
+        return value.isEmpty() ? "—" : value;
     }
 
     /**
@@ -290,39 +359,136 @@ public class Agent {
     }
 
     /**
+     * What closing the task did, or why it did not.
+     *
+     * @param closed   false when the state machine refused the move to {@code done}, in which case
+     *                 nothing was promoted and nothing was cleared
+     * @param why      the refusal, or what was promoted — the page shows this either way
+     * @param longTerm the long-term block as it now stands
+     */
+    public record TaskClosure(boolean closed, String why, LongTermMemory longTerm) {
+    }
+
+    /**
      * Closes the task in hand: everything working memory had marked as agreed graduates to
-     * long-term, and the rest of the block is thrown away.
+     * long-term, the rest of the block is thrown away, and the state machine is reset.
      * <p>
      * This is the one moment a decision crosses a lifetime boundary, and it is deliberately a
      * thing the user does rather than a thing the model infers. Long-term memory is shared by
      * every branch of every conversation; promoting a decision while the task that produced it is
      * still open leaks it into the forks that exist precisely to disagree with it, and a model
      * guessing at "is this task finished?" would do exactly that on the turn it guessed wrong.
-     *
-     * @return the long-term block after the promotion, for rendering the result of the button
+     * <p>
+     * <strong>This button is the {@code → done} transition</strong>, which is what gives the
+     * transition table something to actually govern. A task sitting in {@code planning} cannot be
+     * closed, because nothing has been built and nothing has been checked, and the promotion would
+     * write "agreed" lines about work that never happened into memory every later branch reads.
+     * <p>
+     * A conversation that never started a task is exempt, and that is not a loophole: the machine
+     * governs tasks that have a state, and one with no state is the pre-Day-13 behaviour, where
+     * closing was simply a way to file what the dialogue had agreed.
      */
-    public LongTermMemory finishTask(MemoryScope scope) {
+    public TaskClosure finishTask(MemoryScope scope) {
         MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
         String id = where.conversation();
-        List<Facts.Fact> settled = conversations.facts(id).settled();
+        TaskState task = conversations.task(id);
 
+        if (task.isPresent()) {
+            TaskState.Transition closing = task.apply(
+                    TaskState.Proposal.toStage(TaskStage.DONE), TaskState.Authority.HUMAN);
+            if (closing.refused()) {
+                log.info("Refused to close the task — {}. Nothing promoted.", closing.why());
+                return new TaskClosure(false, closing.why(), longTerm.recall(where.visitor()));
+            }
+        }
+
+        List<Facts.Fact> settled = conversations.facts(id).settled();
         conversations.saveFacts(id, Facts.EMPTY);
+        conversations.saveTask(id, TaskState.EMPTY);
+
         if (settled.isEmpty()) {
             log.info("Task closed with nothing agreed — working memory cleared, long-term untouched.");
-            return longTerm.recall(where.visitor());
+            return new TaskClosure(true, "Task closed; nothing had been agreed to keep.",
+                    longTerm.recall(where.visitor()));
         }
         LongTermMemory kept = longTerm.remember(where.visitor(),
                 LongTermMemory.promoted(LongTermKind.DECISION, settled));
         log.info("Task closed — promoted {} agreed fact(s) to long-term memory (rev {}) and cleared "
                 + "the rest of working memory.", settled.size(), kept.revision());
-        return kept;
+        return new TaskClosure(true,
+                "Task closed; %d agreed fact(s) kept.".formatted(settled.size()), kept);
     }
 
-    /** Starts a fresh task: working memory only, leaving the dialogue and the visitor alone. */
+    /**
+     * Starts a fresh task: working memory and the state machine, leaving the dialogue and the
+     * visitor alone.
+     * <p>
+     * The other half of the boundary, and unlike closing it is not gated by the transition table.
+     * Abandoning a task is not a move within the machine — it is throwing the machine away — so a
+     * task stuck anywhere at all must be able to end this way. Refusing to abandon would be the
+     * one refusal with no escape from it.
+     */
     public void newTask(MemoryScope scope) {
         MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
         conversations.saveFacts(where.conversation(), Facts.EMPTY);
-        log.info("New task — working memory cleared; short-term and long-term are untouched.");
+        conversations.saveTask(where.conversation(), TaskState.EMPTY);
+        log.info("New task — working memory and task state cleared; short-term and long-term are "
+                + "untouched.");
+    }
+
+    /** Where the task in hand has got to, for rendering the page. */
+    public TaskState task(String conversationId) {
+        return conversations.task(conversationId);
+    }
+
+    /**
+     * A person moving the task by hand.
+     * <p>
+     * Bound by the same transition table as the model. The button overrides <em>authority</em>,
+     * not legality — if it overrode both, the table would only describe what the model does and
+     * the machine would have two sets of rules, which is one more than a machine can have.
+     */
+    public TaskState moveTask(MemoryScope scope, TaskStage stage) {
+        MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
+        return applyProposedMove(where.conversation(), TaskState.Proposal.toStage(stage),
+                TaskState.Authority.HUMAN);
+    }
+
+    /**
+     * Stops the machine where it stands, and with it the turns. While a task is paused a new
+     * message is refused before any call is made, rather than answered with the state change
+     * quietly dropped.
+     * <p>
+     * Pausing a conversation that never started a task does nothing. Left to
+     * {@link TaskState#pause()} alone it would bump the revision and so bring a task into
+     * existence — a pause that creates the thing it is pausing, and worse, one that then locks a
+     * dialogue which never had a machine to begin with.
+     */
+    public TaskState pauseTask(MemoryScope scope) {
+        MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
+        TaskState current = conversations.task(where.conversation());
+        if (!current.isPresent()) {
+            log.info("Nothing to pause — this conversation has no task.");
+            return current;
+        }
+        TaskState paused = current.pause();
+        conversations.saveTask(where.conversation(), paused);
+        log.info("Task paused in {} — the state is on disk; it survives a restart.",
+                paused.stage().id());
+        return paused;
+    }
+
+    /** Lets the turns through again. Harmless on a task that was never paused, or never started. */
+    public TaskState resumeTask(MemoryScope scope) {
+        MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
+        TaskState current = conversations.task(where.conversation());
+        if (!current.paused()) {
+            return current;
+        }
+        TaskState resumed = current.resume();
+        conversations.saveTask(where.conversation(), resumed);
+        log.info("Task resumed in {}.", resumed.stage().id());
+        return resumed;
     }
 
     /**

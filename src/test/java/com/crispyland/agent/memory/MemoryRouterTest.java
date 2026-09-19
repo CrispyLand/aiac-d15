@@ -1,6 +1,7 @@
 package com.crispyland.agent.memory;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.entry;
 
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -94,6 +95,47 @@ class MemoryRouterTest {
         // to invent and then pretends the user said.
         assertThat(MemoryTag.values())
                 .noneMatch(tag -> tag.destination() == MemoryLayer.SHORT_TERM);
+    }
+
+    @Test
+    void aStageLineIsPulledOutBeforeTheLayersAndLandsInNoneOfThem() {
+        // Every other tag answers "what is known"; this one answers "where has the job got to".
+        // Routing it into working memory would make it a fact the extractor can restate at will,
+        // when the whole point is that it may only change by a move the transition table allows.
+        MemoryRouter.Routed routed = router.route(List.of(
+                new MemoryRouter.Line("stage", "stage", "execution"),
+                new MemoryRouter.Line("stage", "next", "review the migration"),
+                new MemoryRouter.Line("task", "database", "Postgres 16")));
+
+        // Keyed, not ordered: the proposal is read field by field, so the order the extractor
+        // happened to emit them in carries no meaning and is not pinned here.
+        assertThat(routed.stage()).containsOnly(
+                entry("stage", "execution"), entry("next", "review the migration"));
+        assertThat(routed.working()).hasSize(1);
+        assertThat(routed.longTerm()).isEmpty();
+        assertThat(routed.dropped()).isEmpty();
+    }
+
+    @Test
+    void aStageLineIsNotADroppedLineEvenThoughItHasNoDestination() {
+        // The skip that drops an unrecognised tag and the skip that hands a stage line elsewhere
+        // look identical from inside the loop. Conflating them would report every legitimate
+        // transition as a routing failure.
+        assertThat(MemoryTag.STAGE.destination()).isNull();
+        assertThat(MemoryTag.STAGE.isTaskState()).isTrue();
+
+        MemoryRouter.Routed routed = router.route(
+                List.of(new MemoryRouter.Line("stage", "stage", "validation")));
+
+        assertThat(routed.dropped()).isEmpty();
+        assertThat(routed.isEmpty()).isFalse();
+    }
+
+    @Test
+    void onlyTheStageTagReportsWhereTheJobIs() {
+        // Pinned so a later tag cannot quietly acquire the ability to move the machine.
+        assertThat(MemoryTag.values()).filteredOn(MemoryTag::isTaskState)
+                .containsExactly(MemoryTag.STAGE);
     }
 
     @Test

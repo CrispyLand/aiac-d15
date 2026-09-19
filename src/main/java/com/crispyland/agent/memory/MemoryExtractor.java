@@ -3,7 +3,10 @@ package com.crispyland.agent.memory;
 import com.crispyland.agent.llm.ChatRequest;
 import com.crispyland.agent.llm.ChatResponse;
 import com.crispyland.agent.llm.LlmClient;
+import com.crispyland.agent.task.TaskStage;
+import com.crispyland.agent.task.TaskState;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
@@ -88,6 +91,20 @@ public class MemoryExtractor {
             leaning towards, weighing up or has not committed to is `task`, not `decision`; \
             anything that only matters until this job is done is `task`, not `knowledge`.
 
+            The `stage` tag is different from the others: it does not record what is known, it \
+            reports where the job itself has got to. It takes exactly these four keys and no \
+            others, and you emit only the ones this message actually changes:
+            - `stage/stage` — one of: %s
+            - `stage/step` — what is being worked on right now, in a short phrase
+            - `stage/next` — the single action expected next
+            - `stage/waiting` — `user` if that next action is theirs, `agent` if it is yours
+
+            TASK STATE, when shown below, is where the job is now. Move it on only when the \
+            message actually moves it: these are the legal moves, and anything else is refused.
+            %s
+            Most messages do not move the job at all — say nothing about the stage when it has \
+            not changed. Never emit `stage/stage: done`; finishing is the user's to declare.
+
             Output nothing but those lines — no bullets, no numbering, no prose, no commentary. \
             If the message establishes nothing at all, output `none: nothing to keep`.""";
 
@@ -141,14 +158,14 @@ public class MemoryExtractor {
      * @throws com.crispyland.agent.llm.LlmException if the call fails; the caller decides whether
      *         a failed extraction is worth failing the user's turn over
      */
-    public Extraction extract(String userMessage, Collection<String> keysInUse) {
+    public Extraction extract(String userMessage, Collection<String> keysInUse, TaskState task) {
         if (userMessage == null || userMessage.isBlank()) {
             return Extraction.NOTHING;
         }
 
         ChatResponse response = llm.complete(new ChatRequest(model,
-                List.of(Message.system(INSTRUCTIONS.formatted(menu(), maxLines)),
-                        Message.user(brief(userMessage, keysInUse))),
+                List.of(Message.system(INSTRUCTIONS.formatted(menu(), maxLines, stages(), moves())),
+                        Message.user(brief(userMessage, keysInUse, task))),
                 TEMPERATURE, maxTokens, reasoningEffort, List.of(), null));
 
         // A truncated reply is worse than an empty one: the line the ceiling landed in the middle
@@ -173,13 +190,53 @@ public class MemoryExtractor {
         return new Extraction(lines, response.usage().totalTokens());
     }
 
-    /** Keys first, then the message. Omitted entirely when nothing is held, so a first turn is
-     * not shown an empty heading it has to interpret. */
-    private static String brief(String userMessage, Collection<String> keysInUse) {
-        if (keysInUse == null || keysInUse.isEmpty()) {
-            return "NEW MESSAGE:\n" + userMessage;
+    /**
+     * Where the job is, then the keys, then the message. Each heading is omitted entirely when it
+     * has nothing under it, so a first turn is not shown empty sections it has to interpret.
+     * <p>
+     * The current state is shown, unlike the values of the keys, and the asymmetry is deliberate.
+     * Showing held <em>values</em> invites the model to re-emit them and lose some; showing the
+     * current stage invites nothing, because a stage is not a list. Without it the model can only
+     * name stages blindly and almost every proposal is an illegal jump the machine then refuses.
+     */
+    private static String brief(String userMessage, Collection<String> keysInUse, TaskState task) {
+        StringBuilder text = new StringBuilder();
+        if (task != null && task.isPresent()) {
+            text.append("TASK STATE:\n").append(task.render()).append("\n\n");
         }
-        return "KEYS IN USE:\n" + String.join(", ", keysInUse) + "\n\nNEW MESSAGE:\n" + userMessage;
+        if (keysInUse != null && !keysInUse.isEmpty()) {
+            text.append("KEYS IN USE:\n").append(String.join(", ", keysInUse)).append("\n\n");
+        }
+        return text.append("NEW MESSAGE:\n").append(userMessage).toString();
+    }
+
+    /** The stage vocabulary, minus the one the model is not allowed to propose. */
+    private static String stages() {
+        return String.join(", ", Arrays.stream(TaskStage.values())
+                .filter(stage -> !stage.requiresHuman())
+                .map(TaskStage::id).toList());
+    }
+
+    /**
+     * The transition table as the prompt shows it, generated rather than typed so the rules the
+     * model is given and the rules the machine enforces cannot drift apart.
+     * <p>
+     * Self-transitions are left out. "execution → execution" as a listed move reads as something
+     * to do rather than as the default, and the default — say nothing — is what most turns want.
+     */
+    private static String moves() {
+        StringBuilder text = new StringBuilder();
+        for (TaskStage from : TaskStage.values()) {
+            List<String> targets = from.moves().stream()
+                    .filter(to -> to != from)
+                    .map(TaskStage::id).toList();
+            if (targets.isEmpty()) {
+                continue;
+            }
+            text.append("- from ").append(from.id()).append(" you may move to: ")
+                    .append(String.join(", ", targets)).append('\n');
+        }
+        return text.toString();
     }
 
     /** The tag menu as the prompt shows it — one line per tag, straight off the routing table. */

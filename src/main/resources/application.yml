@@ -81,6 +81,26 @@ agent:
     # visitor's prompt starts a little larger every week and nobody notices until it overflows.
     max-entries: 24
 
+  # INVARIANTS — the standing rules the assistant may not break.
+  #
+  # Not a memory layer and not a profile: memory is what the agent inferred, a profile is how the
+  # user wants to be spoken to, and an invariant is what may not be proposed at all. Only a person
+  # can declare or retire one — nothing in the extraction path can write here, because a model that
+  # can mint its own constraints can mint the one that permits what it wanted to do.
+  #
+  # Its own file so that `cat ./data/invariants.json` answers "what is this assistant not allowed
+  # to do?" without reading a transcript. No cap: a ceiling here would silently drop a rule the
+  # user still believes is in force, and they would find out when the agent proposed it.
+  invariants:
+    file: ./data/invariants.json
+
+    # The guard is tiered, and this only pays for the top tier. A rule with watched terms that
+    # `forbid` outright is settled in Java for nothing; only a `watch` term that actually hit, or
+    # a `model` rule that has no terms to hit, is worth a call. Most turns make none.
+    model: openai/gpt-oss-20b
+    max-tokens: 400
+    reasoning-effort: low
+
   # PERSONALIZATION — and note that this is not a fourth memory layer.
   #
   # Everything above is something the agent worked out from what was said, and each layer ends at

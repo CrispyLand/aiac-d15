@@ -11,6 +11,11 @@ package com.crispyland.agent.usage;
  * The breakdown is one line per memory layer, plus the things that are not memory at all:
  * <ul>
  *   <li>{@code systemTokens} — the instruction, re-sent every single call</li>
+ *   <li>{@code invariantTokens} — the standing rules. Counted apart from memory for the same
+ *       reason the profile is, and more so: an invariant is not something the agent inferred, it
+ *       is something a person declared, and it stays in the prompt until they retire it. The
+ *       figure is worth seeing precisely because it is the one line here that a cost-conscious
+ *       reader might want to cut and must not</li>
  *   <li>{@code profileTokens} — the user's declared preferences; not memory, and deliberately
  *       counted apart from it, because a profile is what somebody asked for rather than
  *       something the agent worked out, and the two fail in different ways</li>
@@ -40,6 +45,7 @@ public record ContextBudget(
         String model,
         long contextWindow,
         long systemTokens,
+        long invariantTokens,
         long profileTokens,
         long longTermTokens,
         long workingTokens,
@@ -61,17 +67,18 @@ public record ContextBudget(
 
     /** The messages alone, before the provider's template is added — what was actually encoded. */
     public long countedTokens() {
-        return systemTokens + profileTokens + longTermTokens + workingTokens + taskTokens
-                + summaryTokens + historyTokens + inputTokens;
+        return systemTokens + invariantTokens + profileTokens + longTermTokens + workingTokens
+                + taskTokens + summaryTokens + historyTokens + inputTokens;
     }
 
     /**
      * Everything the three memory layers cost on this one call.
      * <p>
-     * The profile is not in here even though it sits beside them in the prompt. Memory is what
-     * this figure is for — it exists so a layer that costs tokens every turn and never changes an
-     * answer is visibly not paying for itself, and a profile is not up for that judgement: the
-     * user asked for it, so its cost is theirs to decide on, not the agent's to justify.
+     * Neither the profile nor the invariants are in here, even though both sit beside them in the
+     * prompt. Memory is what this figure is for — it exists so a layer that costs tokens every turn
+     * and never changes an answer is visibly not paying for itself, and neither of those two is up
+     * for that judgement: the user asked for them, so their cost is theirs to decide on, not the
+     * agent's to justify.
      */
     public long memoryTokens() {
         return longTermTokens + workingTokens + taskTokens + summaryTokens + historyTokens;
@@ -138,6 +145,10 @@ public record ContextBudget(
         return droppedMessages > 0;
     }
 
+    public boolean hasInvariants() {
+        return invariantTokens > 0;
+    }
+
     public boolean hasProfile() {
         return profileTokens > 0;
     }
@@ -164,6 +175,10 @@ public record ContextBudget(
 
     public int systemPercent() {
         return percentOfWindow(systemTokens);
+    }
+
+    public int invariantPercent() {
+        return percentOfWindow(invariantTokens);
     }
 
     public int profilePercent() {

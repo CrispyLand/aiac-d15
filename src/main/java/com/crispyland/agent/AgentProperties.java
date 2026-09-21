@@ -26,7 +26,27 @@ public record AgentProperties(
         Compression compression,
         FactMemory facts,
         LongTerm longTerm,
+        Invariants invariants,
         Personalization profiles) {
+
+    /**
+     * Where the standing rules live.
+     *
+     * Where the standing rules live, and what the guard over them costs.
+     *
+     * @param file            its own file, and the one you would hand to somebody who asked what
+     *                        this assistant is not allowed to do. A constraint buried in the
+     *                        conversation log is a constraint nobody can audit — and unlike the
+     *                        other stores there is no cap here, because a ceiling on invariants
+     *                        would silently drop a rule somebody is relying on
+     * @param model           which model rules on the rules a term search cannot settle; blank
+     *                        falls back to the main one
+     * @param maxTokens       ceiling on the guard's reply. It answers in one short line, so this
+     *                        only needs to cover the hidden reasoning tokens spent before it
+     * @param reasoningEffort {@code ""} omits the parameter, required for qwen/compound
+     */
+    public record Invariants(String file, String model, int maxTokens, String reasoningEffort) {
+    }
 
     /**
      * Where the hand-edited profile files live.

@@ -1,5 +1,6 @@
 package com.crispyland.agent;
 
+import com.crispyland.agent.invariant.InvariantGuard;
 import com.crispyland.agent.judge.Verdict;
 import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.usage.ContextBudget;
@@ -15,6 +16,11 @@ import java.util.List;
  *               be held against the provider's ground truth on every single turn
  * @param compactedMessages how many older messages this turn folded into the summary before
  *                          it ran; 0 on every turn that did not trigger a compression
+ * @param refusal           the standing rule this turn would have broken, when it would have. A
+ *                          refusal comes back as an ordinary result rather than as an exception,
+ *                          because unlike an overflow or a paused task, something useful was
+ *                          produced: the rule, the reason for it, and what to do instead. The
+ *                          {@code answer} <em>is</em> that redirect
  */
 public record AgentResult(
         String answer,
@@ -26,10 +32,17 @@ public record AgentResult(
         long latencyMillis,
         Verdict verdict,
         List<Message> transcript,
-        int compactedMessages) {
+        int compactedMessages,
+        InvariantGuard.Ruling refusal) {
 
     public AgentResult {
         transcript = (transcript == null) ? List.of() : List.copyOf(transcript);
+        refusal = (refusal == null) ? InvariantGuard.Ruling.CLEAR : refusal;
+    }
+
+    /** True when the answer above is a refusal rather than a reply. */
+    public boolean refused() {
+        return refusal.breached();
     }
 
     /** How far the local estimate missed the provider's {@code prompt_tokens} by, in tokens. */

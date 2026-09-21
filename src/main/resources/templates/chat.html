@@ -123,6 +123,38 @@
         .danger { background: transparent; border: 1px solid #e8b4b4; color: #c92a2a;
                   border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: 600; }
         .danger:hover { background: #fff0f0; border-color: #c92a2a; }
+        /* Invariants. Red, and not sharing a colour with any memory layer or with the profile,
+           because they are not one: a layer holds what was worked out, a profile holds how to
+           answer, and this holds what may not be proposed at all. Sits above long-term memory for
+           the same reason it sits at the top of the prompt — authority, not age. */
+        .inv { border-top: 3px solid #c92a2a; margin-bottom: 18px; }
+        .invhead { display: flex; align-items: center; justify-content: space-between;
+                   gap: 12px; font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+        .invhead b { color: #c92a2a; font-size: 14px; }
+        .invgroup { margin-top: 10px; }
+        .invkind { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+        .invkind b { color: #c92a2a; font-size: 12px; text-transform: uppercase;
+                     letter-spacing: .04em; margin-right: 6px; }
+        .invrule { display: flex; gap: 10px; align-items: baseline; padding: 6px 0;
+                   border-bottom: 1px solid #f7dcdc; font-size: 13px; }
+        .invrule:last-child { border-bottom: 0; }
+        .invrule .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                       font-size: 11px; font-weight: 700; color: #c92a2a; flex: 0 0 56px; }
+        .invrule .body { flex: 1; }
+        .invrule .why { display: block; font-size: 11px; color: var(--muted); font-style: italic; }
+        .invrule .terms { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                          font-size: 10px; color: var(--muted); }
+        .invrule.off { opacity: .55; }
+        .invrule.off .body > span:first-child { text-decoration: line-through; }
+        .chk { font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+               border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+               color: var(--muted); }
+        .chk.forbid { border-color: #c92a2a; color: #c92a2a; }
+        .invnew { display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+                  margin-top: 14px; padding-top: 12px; border-top: 1px dashed #f0c9c9; }
+        .invnew input, .invnew select { border: 1px solid var(--line); border-radius: 7px;
+                                        padding: 5px 9px; font-size: 12px; background: #fff; }
+        .invnew input.wide { flex: 1 1 240px; }
         /* Personalization gets its own colour, deliberately not one of the three memory colours:
            it is not a layer, and colouring it like one would say it was. */
         .persona { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -196,6 +228,7 @@
         }
         .seg { height: 100%; }
         .seg.sys { background: #7048e8; }
+        .seg.inv { background: #c92a2a; }
         .seg.prof { background: #f76707; }
         .seg.sum { background: #0ca678; }
         .seg.lt { background: #ae3ec9; }
@@ -251,6 +284,87 @@
             <span th:text="${l.tagline}"></span>
             <span class="scope">scope: <b th:text="${l.scope}"></b> · lives
                 <b th:text="${l.lifetime}"></b></span>
+        </div>
+    </div>
+
+    <!-- The standing rules, and the form that declares them. This panel is the answer to "what is
+         this assistant not allowed to do?", which is a question nobody should have to test for.
+
+         Note what has no button here: there is no way for the agent to add a rule. Every other
+         block on this page can be written by the extractor; this one is reachable only from the
+         form below. A model that can mint its own constraints can mint the one that permits what
+         it wanted to do, and the whole mechanism becomes decorative.
+
+         Retired rules stay listed, struck through, with the reason. A rule that vanished when it
+         stopped applying would leave the page unable to tell a constraint that was lifted from one
+         that was never declared. -->
+    <div class="card inv">
+        <div class="invhead">
+            <span><b>Invariants</b> ·
+                <span th:text="${invariants.binding().size()}">0</span> binding
+                · rev <span th:text="${invariants.revision}">0</span>
+                · checked before the answer call, not after</span>
+        </div>
+
+        <div th:each="k : ${invariantKinds}" th:if="${!invariants.of(k).isEmpty()}"
+             th:with="held=${invariants.of(k)}" class="invgroup">
+            <span class="invkind"><b th:text="${k.label}">Stack constraints</b>
+                <span th:text="${k.tagline}"></span></span>
+            <div th:each="i : ${held}" class="invrule">
+                <span class="id" th:text="${i.label}">INV-1</span>
+                <span class="body">
+                    <span th:text="${i.rule}">Do not propose a datastore other than Postgres.</span>
+                    <span class="chk" th:classappend="${i.check.id}" th:text="${i.check.id}"
+                          th:title="${i.check.what}">forbid</span>
+                    <span class="terms" th:if="${!i.watch.isEmpty()}"
+                          th:text="'[' + ${#strings.listJoin(i.watch, ', ')} + ']'"></span>
+                    <span class="why" th:if="${!i.why.isEmpty()}"
+                          th:text="'why: ' + ${i.why}"></span>
+                    <span class="why" th:if="${!i.instead.isEmpty()}"
+                          th:text="'instead: ' + ${i.instead}"></span>
+                </span>
+                <button type="submit" form="retireInvariantForm" name="id" th:value="${i.id}"
+                        class="fork" onclick="return askWhyLifted();"
+                        title="Lifts the rule without deleting it. You will be asked why.">retire</button>
+            </div>
+        </div>
+
+        <div th:if="${!invariants.retired().isEmpty()}" class="invgroup">
+            <span class="invkind"><b>Retired</b>
+                <span>no longer binding, kept so the change is on the record</span></span>
+            <div th:each="i : ${invariants.retired()}" class="invrule off">
+                <span class="id" th:text="${i.label}">INV-3</span>
+                <span class="body">
+                    <span th:text="${i.rule}">No Mongo.</span>
+                    <span class="why" th:if="${!i.retiredWhy.isEmpty()}"
+                          th:text="'lifted: ' + ${i.retiredWhy}"></span>
+                </span>
+                <button type="submit" form="restoreInvariantForm" name="id" th:value="${i.id}"
+                        class="fork" title="Puts the rule back in force.">restore</button>
+            </div>
+        </div>
+
+        <!-- `check` is the cost dial, and it is on the form rather than inferred because only the
+             author knows which of the three a rule is. `forbid` settles in Java for nothing;
+             `watch` spends a call only on the turns a term actually hit; `model` spends one every
+             turn, and is the honest price of a rule no term search can express. -->
+        <div class="invnew">
+            <input class="wide" name="rule" form="declareInvariantForm" required
+                   placeholder="The rule — e.g. Do not propose a datastore other than Postgres.">
+            <input class="wide" name="why" form="declareInvariantForm"
+                   placeholder="Why it exists — this goes in the refusal">
+            <input class="wide" name="instead" form="declareInvariantForm"
+                   placeholder="What to do instead — this is what makes a refusal useful">
+            <input name="watch" form="declareInvariantForm"
+                   placeholder="watched terms, comma-separated">
+            <select name="kind" form="declareInvariantForm">
+                <option th:each="k : ${invariantKinds}" th:value="${k.id}" th:text="${k.label}">Stack</option>
+            </select>
+            <select name="check" form="declareInvariantForm" title="How it is enforced, and what it costs.">
+                <option th:each="c : ${checks}" th:value="${c.id}"
+                        th:text="${c.id} + ' — ' + ${c.what}">forbid</option>
+            </select>
+            <button type="submit" form="declareInvariantForm">Declare</button>
         </div>
     </div>
 
@@ -555,6 +669,7 @@
                 <!-- Segment order follows the prompt's own layer order, so the bar reads as a
                      picture of the request rather than as an arbitrary stack. -->
                 <span class="seg sys" th:style="'width:' + ${budget.systemPercent} + '%'"></span>
+                <span class="seg inv" th:style="'width:' + ${budget.invariantPercent} + '%'"></span>
                 <span class="seg prof" th:style="'width:' + ${budget.profilePercent} + '%'"></span>
                 <span class="seg lt" th:style="'width:' + ${budget.longTermPercent} + '%'"></span>
                 <span class="seg facts" th:style="'width:' + ${budget.workingPercent} + '%'"></span>
@@ -570,6 +685,8 @@
             <div class="key">
                 <span><i style="background:#7048e8"></i>system prompt
                       <b th:text="${#numbers.formatInteger(budget.systemTokens, 1, 'COMMA')}">0</b></span>
+                <span th:if="${budget.hasInvariants}"><i style="background:#c92a2a"></i>invariants
+                      <b th:text="${#numbers.formatInteger(budget.invariantTokens, 1, 'COMMA')}">0</b></span>
                 <span th:if="${budget.hasProfile}"><i style="background:#f76707"></i>profile
                       <b th:text="${#numbers.formatInteger(budget.profileTokens, 1, 'COMMA')}">0</b></span>
                 <span th:if="${budget.hasLongTerm}"><i style="background:#ae3ec9"></i>long-term
@@ -655,6 +772,14 @@
     <form id="resumeTaskForm" method="post" action="/task/resume"></form>
     <form id="newTaskForm" method="post" action="/task/new"
           onsubmit="return confirm('Discard working memory, including anything agreed? The dialogue and long-term memory stay.');"></form>
+    <form id="declareInvariantForm" method="post" action="/invariant/declare"></form>
+    <!-- The reason is asked for rather than typed in the row, because every rule shares this one
+         form: a text box per row would post all of them at once and the reason would attach to
+         whichever rule happened to be first. One hidden field, filled by the button that was
+         clicked, keeps the pairing unambiguous. -->
+    <form id="retireInvariantForm" method="post" action="/invariant/retire">
+        <input type="hidden" id="retireReason" name="reason"></form>
+    <form id="restoreInvariantForm" method="post" action="/invariant/restore"></form>
     <form id="forgetForm" method="post" action="/memory/forget"></form>
     <form id="forgetAllForm" method="post" action="/memory/forget-all"
           onsubmit="return confirm('Delete everything remembered about you, every branch, and the id itself? This cannot be undone.');"></form>
@@ -686,7 +811,25 @@
         <div th:text="${error}"></div>
     </div>
 
-    <div class="card" th:if="${result}">
+    <!-- Amber, not red: a refusal is the feature working. The numbers underneath are the argument
+         — on the `forbid` tier this cost nothing at all, because a regex settled it before the
+         answer call was ever made. The refusal itself is in the transcript above, as an ordinary
+         turn, so the next message is answered in light of it rather than re-proposing the same
+         thing two turns later. -->
+    <div class="card refused" th:if="${result != null and result.refused}">
+        <h2 th:text="'Refused by ' + ${result.refusal.broken.label}">Refused by INV-1</h2>
+        <div th:text="${result.answer}"></div>
+        <div class="meta" style="margin-top:8px">
+            <span th:if="${result.refusal.settledInJava}"
+                  th:text="'matched on ' + ${#strings.listJoin(result.refusal.terms, ', ')}
+                           + ' — settled in Java, no call made, nothing charged'">matched on mongo</span>
+            <span th:unless="${result.refusal.settledInJava}"
+                  th:text="'ruled on by the guard, ' + ${result.refusal.costTokens}
+                           + ' token(s) — the answer call was never made'">ruled on by the guard</span>
+        </div>
+    </div>
+
+    <div class="card" th:if="${result != null and !result.refused}">
         <h2>Last turn</h2>
         <div class="usage">
             <span class="pill">prompt <b th:text="${result.usage.promptTokens}">0</b></span>
@@ -774,6 +917,16 @@
     // would otherwise land below the fold.
     var stream = document.getElementById('stream');
     if (stream) { stream.scrollTop = stream.scrollHeight; }
+
+    // Asked, not optional-looking: a rule that stops applying is a decision, and the reason for
+    // it is the part worth keeping. Cancel aborts the retire entirely rather than lifting the rule
+    // with a blank reason — backing out is the likelier intent than "lift it, never mind why".
+    function askWhyLifted() {
+        var why = prompt('Why is this rule being lifted? It stays on the record.');
+        if (why === null) { return false; }
+        document.getElementById('retireReason').value = why;
+        return true;
+    }
 
     // Enter sends, Shift+Enter inserts a newline.
     document.getElementById('userInput').addEventListener('keydown', function (e) {

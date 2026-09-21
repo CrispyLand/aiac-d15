@@ -12,6 +12,10 @@ import com.crispyland.agent.profile.Profiles;
 import com.crispyland.agent.memory.HistoryCompressor;
 import com.crispyland.agent.memory.InMemoryBranchStore;
 import com.crispyland.agent.memory.InMemoryConversationStore;
+import com.crispyland.agent.invariant.InMemoryInvariantStore;
+import com.crispyland.agent.invariant.InvariantGuard;
+import com.crispyland.agent.invariant.InvariantStore;
+import com.crispyland.agent.invariant.JsonFileInvariantStore;
 import com.crispyland.agent.memory.InMemoryLongTermStore;
 import com.crispyland.agent.memory.JsonFileBranchStore;
 import com.crispyland.agent.memory.JsonFileConversationStore;
@@ -180,6 +184,37 @@ public class AgentConfiguration {
                     Path.of(longTerm.file()), longTerm.maxEntries());
         }
         return new InMemoryLongTermStore(longTerm.maxEntries());
+    }
+
+    /**
+     * Invariants follow the same {@code memory.store} switch, into a third file.
+     * <p>
+     * Sharing the switch says "does this deployment write to disk at all"; keeping the file
+     * separate says the rules do not expire when a conversation does. The louder reason is that
+     * this is the file somebody audits.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public InvariantStore invariantStore(AgentProperties properties) {
+        if (AgentProperties.Memory.JSON.equalsIgnoreCase(properties.memory().store())) {
+            return new JsonFileInvariantStore(JsonMapper.builder().build(),
+                    Path.of(properties.invariants().file()));
+        }
+        return new InMemoryInvariantStore();
+    }
+
+    /**
+     * The guard over those rules. A separate bean from the store for the usual reason — one holds
+     * the rules, the other spends money deciding about them, and only one of those is worth
+     * configuring a model for.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public InvariantGuard invariantGuard(LlmClient llmClient, AgentProperties properties) {
+        AgentProperties.Invariants rules = properties.invariants();
+        String model = (rules.model() == null || rules.model().isBlank())
+                ? properties.defaults().model() : rules.model();
+        return new InvariantGuard(llmClient, model, rules.maxTokens(), rules.reasoningEffort());
     }
 
     /** Refs follow the transcripts: persisted together, forgotten together. */

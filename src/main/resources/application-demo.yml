@@ -29,9 +29,19 @@ agent:
     # will simply succeed, because the real model is happy to take it.
     overflow-policy: fail
 
+  # Every file the app writes to gets a demo twin. One override is not enough: the profile
+  # redirected only the transcript for a long time, which meant a rule or a fact created on camera
+  # landed in the real file and stayed there. The layers are separate files precisely so their
+  # lifetimes can differ, and a demo is a lifetime — it should end when the recording does.
   memory:
-    # Keep the demo dialogue off the real transcript file.
     file: ./data/conversations-demo.json
+    branch-file: ./data/branches-demo.json
+
+  long-term:
+    file: ./data/memory-demo.json
+
+  invariants:
+    file: ./data/invariants-demo.json
 
   compression:
     # Fire after two turns instead of five, so the fold is visible on camera without typing

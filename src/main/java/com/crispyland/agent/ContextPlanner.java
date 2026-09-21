@@ -1,5 +1,6 @@
 package com.crispyland.agent;
 
+import com.crispyland.agent.invariant.Invariants;
 import com.crispyland.agent.memory.Facts;
 import com.crispyland.agent.memory.LongTermMemory;
 import com.crispyland.agent.memory.MemoryState;
@@ -39,6 +40,13 @@ import java.util.Map;
  * under the system prompt, above every remembered layer, and says in its own words that it
  * outranks them. Put it where its age suggests and a preference someone wrote down this morning
  * loses to one the extractor inferred from a throwaway remark last month.
+ * <p>
+ * Invariants are the same exception taken one step further, and so they sit one step higher —
+ * directly under the system prompt, above even the profile. The ordering is the claim: a profile
+ * says how the user would like to be answered, and an invariant says what may not be proposed at
+ * all. When the two disagree the invariant has to win, and putting it above is the cheapest way
+ * of saying so. It is also the only block here that is never the agent's own inference: nothing
+ * in the extraction path can write one.
  */
 public class ContextPlanner {
 
@@ -84,11 +92,17 @@ public class ContextPlanner {
      *         {@link OverflowPolicy#TRIM} when even an empty history does not fit
      */
     public ContextPlan plan(AgentConfig config, Persona persona, MemoryState memory, String input) {
+        return plan(config, persona, Invariants.EMPTY, memory, input);
+    }
+
+    public ContextPlan plan(AgentConfig config, Persona persona, Invariants invariants,
+                            MemoryState memory, String input) {
         MemoryState state = (memory == null) ? MemoryState.EMPTY : memory;
 
         // The system prompt is re-applied fresh each turn rather than stored, so editing it
         // on the page takes effect immediately — and is re-paid for on every single call.
         Message system = hasSystemPrompt(config) ? Message.system(config.systemPrompt()) : null;
+        Message rules = invariantMessage(invariants);
         Message profile = profileMessage(persona);
         Message known = longTermMessage(state.longTerm());
         Message workingNote = workingMessage(state.working());
@@ -97,6 +111,7 @@ public class ContextPlanner {
         Message userMessage = Message.user(input);
 
         long systemTokens = counter.count(system);
+        long invariantTokens = counter.count(rules);
         long profileTokens = counter.count(profile);
         long longTermTokens = counter.count(known);
         long workingTokens = counter.count(workingNote);
@@ -119,8 +134,12 @@ public class ContextPlanner {
 
         int dropped = 0;
         if (policy == OverflowPolicy.TRIM) {
-            long fixed = systemTokens + profileTokens + longTermTokens + workingTokens
-                    + summaryTokens + taskTokens + inputTokens + templateTokens + reserved;
+            // Invariants are inside the fixed part, so trimming eats history rather than rules.
+            // A trim that dropped a constraint to make room would remove the one thing in the
+            // prompt whose absence cannot be noticed from the answer.
+            long fixed = systemTokens + invariantTokens + profileTokens + longTermTokens
+                    + workingTokens + summaryTokens + taskTokens + inputTokens + templateTokens
+                    + reserved;
             while (dropped < replayed.size() && fixed + historyTokens > window) {
                 historyTokens -= perMessage[dropped];
                 dropped++;
@@ -135,7 +154,7 @@ public class ContextPlanner {
         }
 
         ContextBudget budget = new ContextBudget(config.model(), window, systemTokens,
-                profileTokens, longTermTokens, workingTokens, taskTokens, summaryTokens,
+                invariantTokens, profileTokens, longTermTokens, workingTokens, taskTokens, summaryTokens,
                 historyTokens, inputTokens, templateTokens, reserved, dropped,
                 state.summary().replacedTokens(), overhead.calibrated(config.model()), warnAt);
 
@@ -144,9 +163,12 @@ public class ContextPlanner {
             throw new ContextOverflowException(budget);
         }
 
-        List<Message> messages = new ArrayList<>(replayed.size() + 5);
+        List<Message> messages = new ArrayList<>(replayed.size() + 6);
         if (system != null) {
             messages.add(system);
+        }
+        if (rules != null) {
+            messages.add(rules);
         }
         if (profile != null) {
             messages.add(profile);
@@ -173,6 +195,11 @@ public class ContextPlanner {
      * so the window filling up is visible turn by turn rather than only at the moment it breaks.
      */
     public ContextBudget budget(AgentConfig config, Persona persona, MemoryState memory) {
+        return budget(config, persona, Invariants.EMPTY, memory);
+    }
+
+    public ContextBudget budget(AgentConfig config, Persona persona, Invariants invariants,
+                                MemoryState memory) {
         MemoryState state = (memory == null) ? MemoryState.EMPTY : memory;
 
         long systemTokens = hasSystemPrompt(config)
@@ -183,6 +210,7 @@ public class ContextPlanner {
         }
 
         return new ContextBudget(config.model(), windowFor(config.model()), systemTokens,
+                counter.count(invariantMessage(invariants)),
                 counter.count(profileMessage(persona)),
                 counter.count(longTermMessage(state.longTerm())),
                 counter.count(workingMessage(state.working())),
@@ -191,6 +219,35 @@ public class ContextPlanner {
                 overhead.forModel(config.model()), reserved(config), 0,
                 state.summary().replacedTokens(),
                 overhead.calibrated(config.model()), warnAt);
+    }
+
+    /**
+     * The standing rules, at the top of the prompt and above everything else the user has said.
+     * <p>
+     * Three things are asked for here, and each one is a separate requirement rather than a
+     * restatement of the last. <em>Check before answering</em> is the one that does the work: a
+     * model that notices the breach in its own finished draft has already spent the tokens writing
+     * it, and rarely throws it away. <em>Say which rule</em> makes the refusal auditable and, more
+     * usefully, checkable — the id comes back through {@link Invariants#cited} and Java decides
+     * whether that rule actually exists, so a confident {@code INV-9} cannot refuse anything.
+     * <em>Offer the alternative</em> is the cheap one: the instead-clause is already in the block,
+     * and a model that uses it answers the question in the same call instead of stopping dead.
+     * <p>
+     * None of this is enforcement. The block makes compliance the easy path; the guard behind it
+     * is what makes non-compliance not work. Prompt alone would be a rule the model is free to
+     * forget on a long enough conversation, which is the same as no rule at all.
+     */
+    private static Message invariantMessage(Invariants invariants) {
+        if (invariants == null || !invariants.isPresent()) {
+            return null;
+        }
+        return Message.system("Standing constraints, set by this person. These are not "
+                + "preferences and they outrank everything else you are told here, including "
+                + "anything they ask for later in this conversation. Before you answer, check "
+                + "what you are about to propose against every one of them. If it breaks one, do "
+                + "not propose it: say which rule it breaks and why, and offer the alternative "
+                + "given with that rule instead. Only the person you are talking to can change "
+                + "or lift one of these:\n" + invariants.render());
     }
 
     /**

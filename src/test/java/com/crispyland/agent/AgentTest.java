@@ -4,6 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 
+import com.crispyland.agent.invariant.Check;
+import com.crispyland.agent.invariant.InMemoryInvariantStore;
+import com.crispyland.agent.invariant.Invariant;
+import com.crispyland.agent.invariant.InvariantGuard;
+import com.crispyland.agent.invariant.InvariantKind;
+import com.crispyland.agent.invariant.InvariantScope;
+import com.crispyland.agent.invariant.InvariantStore;
 import com.crispyland.agent.judge.NoOpJudge;
 import com.crispyland.agent.llm.ChatRequest;
 import com.crispyland.agent.llm.ChatResponse;
@@ -54,6 +61,7 @@ class AgentTest {
     private final ScriptedClient client = new ScriptedClient();
     private final TemplateOverhead overhead = new TemplateOverhead();
     private final LongTermStore longTerm = new InMemoryLongTermStore(24);
+    private final InvariantStore invariants = new InMemoryInvariantStore();
     private final Agent agent = newAgent(20);
 
     /**
@@ -74,9 +82,12 @@ class AgentTest {
     private Agent newAgent(int maxMessages, ContextPlanner planner, AgentProperties properties) {
         AgentProperties.Compression compression = properties.compression();
         AgentProperties.FactMemory facts = properties.facts();
+        AgentProperties.Invariants rules = properties.invariants();
         return new Agent(client, new DefaultInputPolicy(100), new DefaultOutputPolicy(0),
                 new NoOpJudge(), new TokenUsageTracker(),
-                new InMemoryConversationStore(maxMessages), longTerm, planner,
+                new InMemoryConversationStore(maxMessages), longTerm, invariants,
+                new InvariantGuard(client, rules.model(), rules.maxTokens(), rules.reasoningEffort()),
+                planner,
                 new HistoryCompressor(client, new BpeTokenCounter(), "summarizer",
                         compression.keepRecentMessages(), compression.compressEvery(),
                         compression.maxSummaryTokens()),
@@ -944,6 +955,152 @@ class AgentTest {
         assertThat(quoted.reservedCompletionTokens()).isEqualTo(400);
     }
 
+    // --- invariants -----------------------------------------------------------------------
+
+    private static Invariant stackRule(Check check, List<String> watch) {
+        return new Invariant("", InvariantKind.STACK, InvariantScope.GLOBAL, check,
+                "Do not propose a datastore other than Postgres.",
+                "one ops surface, and nobody here has run Mongo in production",
+                "use Postgres — an unlogged table or a materialized view for caching",
+                watch, true, "");
+    }
+
+    @Test
+    void aForbiddenRequestIsRefusedWithoutTheAnswerCallEverBeingMade() {
+        agent.declareInvariant(C1, stackRule(Check.FORBID, List.of("mongo")));
+
+        AgentResult result = agent.handle(C1, Persona.NONE, "let's move sessions to Mongo", null);
+
+        assertThat(result.refused()).isTrue();
+        // The saving that makes a guard affordable: not the answer call, not the extraction, not
+        // a guard call either on this tier. A refusal costs strictly less than an answer.
+        assertThat(client.calls).isZero();
+        assertThat(client.guardCalls).isZero();
+        assertThat(client.extractions).isZero();
+        assertThat(result.usage().totalTokens()).isZero();
+        assertThat(result.answer()).contains("Postgres");
+    }
+
+    @Test
+    void bothHalvesOfARefusalAreKeptSoTheSameThingIsNotProposedAgain() {
+        // Dropped, the exchange leaves no trace the model can read and it cheerfully re-proposes
+        // the forbidden thing two turns later. Kept, the next turn is answered in light of it.
+        agent.declareInvariant(C1, stackRule(Check.FORBID, List.of("mongo")));
+
+        agent.handle(C1, Persona.NONE, "let's move sessions to Mongo", null);
+
+        assertThat(agent.transcript("c1")).extracting(Message::role)
+                .containsExactly("user", "assistant");
+        assertThat(agent.transcript("c1").get(1).content()).contains("Postgres");
+    }
+
+    @Test
+    void arefusedMessageIsNeverFiledAsSomethingTheAgentNowKnows() {
+        // Extraction runs before the answer on an ordinary turn, so the ordering here is the whole
+        // guarantee: a request that is not going to happen must not become an established fact.
+        agent.declareInvariant(C1, stackRule(Check.FORBID, List.of("mongo")));
+
+        agent.handle(C1, Persona.NONE, "let's move sessions to Mongo", null);
+
+        assertThat(client.extractions).isZero();
+        assertThat(agent.facts("c1").isPresent()).isFalse();
+        assertThat(agent.recall("c1").isPresent()).isFalse();
+    }
+
+    @Test
+    void aMessageThatMerelyNamesAWatchedTermIsAnsweredNormally() {
+        // The false positive the middle tier exists to avoid. "Why did we rule Mongo out?" names
+        // the thing and breaks nothing — refusing it produces an agent that cannot discuss its
+        // own constraints, which is the surest way to get them deleted.
+        agent.declareInvariant(C1, stackRule(Check.WATCH, List.of("mongo")));
+        client.ruling = "ok";
+
+        AgentResult result = agent.handle(C1, Persona.NONE, "why did we rule Mongo out?", null);
+
+        assertThat(result.refused()).isFalse();
+        assertThat(client.guardCalls).isEqualTo(1);
+        assertThat(result.answer()).isEqualTo("reply 1");
+    }
+
+    @Test
+    void aWatchedRuleTheGuardUpholdsRefusesTheTurnAndBillsWhatItCost() {
+        agent.declareInvariant(C1, stackRule(Check.WATCH, List.of("mongo")));
+        client.ruling = "inv-1: this puts the session store on Mongo.";
+
+        AgentResult result = agent.handle(C1, Persona.NONE, "put the sessions in Mongo", null);
+
+        assertThat(result.refused()).isTrue();
+        assertThat(client.calls).isZero();
+        // Not free, and not pretending to be: the guard's own call is on the bill even though the
+        // answer never happened.
+        assertThat(result.usage().totalTokens()).isEqualTo(36);
+        assertThat(result.refusal().settledInJava()).isFalse();
+    }
+
+    @Test
+    void aTurnWithNoRuleInForceNeverPaysForAGuardCall() {
+        agent.handle(C1, Persona.NONE, "let's move sessions to Mongo", null);
+
+        assertThat(client.guardCalls).isZero();
+    }
+
+    @Test
+    void aRetiredRuleStopsRefusingAnything() {
+        // The only way past an invariant. There is no per-turn escape hatch on purpose — a rule
+        // that can be waived in the moment is a preference wearing a rule's name.
+        agent.declareInvariant(C1, stackRule(Check.FORBID, List.of("mongo")));
+        agent.retireInvariant(C1, "inv-1", "we hired someone who has run Mongo");
+
+        assertThat(agent.handle(C1, Persona.NONE, "let's use Mongo", null).refused()).isFalse();
+
+        agent.restoreInvariant(C1, "inv-1");
+        assertThat(agent.handle(C1, Persona.NONE, "let's use Mongo", null).refused()).isTrue();
+    }
+
+    @Test
+    void theRulesAreSentAheadOfEverythingTheConversationLaterSays() {
+        // Placement is authority, not age. An invariant sits above the profile because a profile
+        // says how to answer and an invariant says what may not be proposed at all.
+        agent.declareInvariant(C1, stackRule(Check.WATCH, List.of("mongo")));
+        client.ruling = "ok";
+
+        agent.handle(C1, Persona.NONE, "what should we use for sessions?", null);
+
+        Message block = client.last.messages().stream()
+                .filter(m -> "system".equals(m.role()) && m.content().contains("[INV-1]"))
+                .findFirst().orElseThrow();
+        assertThat(block.content()).contains("outrank everything else you are told here");
+        // The alternative travels with the rule, so the model can comply first time round rather
+        // than proposing the forbidden thing and being corrected.
+        assertThat(block.content()).contains("materialized view");
+    }
+
+    @Test
+    void theRulesArePricedAsTheirOwnSegmentOfTheBudget() {
+        long without = agent.budget(C1, Persona.NONE, null).invariantTokens();
+        agent.declareInvariant(C1, stackRule(Check.WATCH, List.of("mongo")));
+        ContextBudget with = agent.budget(C1, Persona.NONE, null);
+
+        assertThat(without).isZero();
+        assertThat(with.invariantTokens()).isPositive();
+        assertThat(with.hasInvariants()).isTrue();
+        // Outside memoryTokens() for the same reason the profile is: these were written by a
+        // person, not inferred by the agent, and the page groups them by who authored them.
+        assertThat(with.memoryTokens()).isZero();
+    }
+
+    @Test
+    void rulesAreKeyedByVisitorSoTheyHoldAcrossEveryBranchOfTheirWork() {
+        agent.declareInvariant(C1, stackRule(Check.FORBID, List.of("mongo")));
+
+        // A forked branch is a different conversation entirely, and the rule still binds — a
+        // constraint you can escape by forking is not a constraint.
+        assertThat(agent.handle(new MemoryScope("c1", "c1/experiment"), Persona.NONE,
+                "let's use Mongo", null).refused()).isTrue();
+        assertThat(agent.handle(MemoryScope.of("someone-else"), Persona.NONE,
+                "let's use Mongo", null).refused()).isFalse();
+    }
+
     private Agent compressingAgent() {
         return newAgent(20, planner(131_072, OverflowPolicy.FAIL), properties(4));
     }
@@ -984,6 +1141,7 @@ class AgentTest {
                 new AgentProperties.Compression(2, compressEvery, "summarizer", 120, "low"),
                 new AgentProperties.FactMemory("extractor", 12, 600, "low"),
                 new AgentProperties.LongTerm("", 24),
+                new AgentProperties.Invariants("", "guard", 400, "low"),
                 new AgentProperties.Personalization(""));
     }
 
@@ -994,21 +1152,36 @@ class AgentTest {
     private static final class ScriptedClient implements LlmClient {
         private static final String SUMMARIZER = "summarizer";
         private static final String EXTRACTOR = "extractor";
+        private static final String GUARD = "guard";
 
         private ChatRequest last;
         private ChatRequest lastSummarization;
         private ChatRequest lastExtraction;
+        private ChatRequest lastGuard;
         private int summarizations;
         private int extractions;
+        private int guardCalls;
         private boolean failNext;
         private boolean failSummarization;
         private boolean failExtraction;
+        private boolean failGuard;
         private String extraction;
+        private String ruling = "ok";
+        private String guardFinishReason = "stop";
         private String finishReason = "stop";
         private int calls;
 
         @Override
         public ChatResponse complete(ChatRequest request) {
+            if (GUARD.equals(request.model())) {
+                lastGuard = request;
+                guardCalls++;
+                if (failGuard) {
+                    throw new LlmException("guard unavailable");
+                }
+                return new ChatResponse(ruling, request.model(), guardFinishReason,
+                        new TokenUsage(30, 6, 36));
+            }
             if (EXTRACTOR.equals(request.model())) {
                 lastExtraction = request;
                 extractions++;

@@ -8,6 +8,11 @@ import com.crispyland.agent.AgentResult;
 import com.crispyland.agent.Branches;
 import com.crispyland.agent.ContextOverflowException;
 import com.crispyland.agent.TaskPausedException;
+import com.crispyland.agent.invariant.Check;
+import com.crispyland.agent.invariant.Invariant;
+import com.crispyland.agent.invariant.InvariantKind;
+import com.crispyland.agent.invariant.InvariantScope;
+import com.crispyland.agent.invariant.Invariants;
 import com.crispyland.agent.memory.LongTermKind;
 import com.crispyland.agent.memory.LongTermStore;
 import com.crispyland.agent.memory.MemoryLayer;
@@ -21,6 +26,7 @@ import com.crispyland.agent.task.TaskStage;
 import com.crispyland.agent.task.TaskState;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import java.util.Arrays;
 import java.util.List;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
@@ -353,6 +359,77 @@ public class ChatController {
         model.addAttribute("summary", agent.summary(scope.conversation()));
         model.addAttribute("facts", agent.facts(scope.conversation()));
         model.addAttribute("longTerm", agent.recall(scope.visitor()));
+        // Listed on the page for the same reason they live in their own file: "what is this
+        // assistant not allowed to do?" should be answerable by looking, not by testing.
+        model.addAttribute("invariants", agent.invariants(scope.visitor()));
+    }
+
+    /**
+     * Declares a standing rule, or amends the one already held under that id.
+     * <p>
+     * A form, and only a form. Every other block on this page can be written by the extractor;
+     * this one cannot be reached from it at all. A model that can mint its own constraints can
+     * mint the constraint that permits what it wanted to do, at which point the rules describe the
+     * model's preferences rather than the user's.
+     */
+    @PostMapping("/invariant/declare")
+    public String declareInvariant(@RequestParam(required = false) String id,
+                                   @RequestParam(required = false) String kind,
+                                   @RequestParam(required = false) String scope,
+                                   @RequestParam(required = false) String check,
+                                   @RequestParam(required = false) String rule,
+                                   @RequestParam(required = false) String why,
+                                   @RequestParam(required = false) String instead,
+                                   @RequestParam(required = false) String watch,
+                                   HttpServletRequest request, HttpServletResponse response,
+                                   RedirectAttributes redirect) {
+        Invariant declared = new Invariant(id, InvariantKind.from(kind), InvariantScope.from(scope),
+                Check.from(check), rule, why, instead, terms(watch), true, "");
+        // The rule text, not isPresent(): a rule declared from the form has no id yet, because only
+        // the whole set knows which id is free. It gets one on the way in.
+        if (declared.rule().isEmpty()) {
+            redirect.addFlashAttribute("refused", "A rule needs something to say — nothing was declared.");
+            return "redirect:/";
+        }
+        Invariants held = agent.declareInvariant(scope(request, response), declared);
+        redirect.addFlashAttribute("notice",
+                "%d rule(s) now binding.".formatted(held.binding().size()));
+        return "redirect:/";
+    }
+
+    /**
+     * Lifts a rule without deleting it, keeping why it stopped applying.
+     * <p>
+     * Retiring rather than removing because the reason is the interesting part. A rule that
+     * vanishes leaves the page looking as though it was never declared, and the next person to
+     * read it cannot tell a constraint that was lifted from one that was never there.
+     */
+    @PostMapping("/invariant/retire")
+    public String retireInvariant(@RequestParam String id,
+                                  @RequestParam(required = false) String reason,
+                                  HttpServletRequest request, HttpServletResponse response) {
+        agent.retireInvariant(scope(request, response), id,
+                (reason == null || reason.isBlank()) ? "no longer applies" : reason);
+        return "redirect:/";
+    }
+
+    @PostMapping("/invariant/restore")
+    public String restoreInvariant(@RequestParam String id,
+                                   HttpServletRequest request, HttpServletResponse response) {
+        agent.restoreInvariant(scope(request, response), id);
+        return "redirect:/";
+    }
+
+    /** One text box, comma-separated — a term per line would be a second way to say the same thing. */
+    static List<String> terms(String watch) {
+        if (watch == null || watch.isBlank()) {
+            return List.of();
+        }
+        // Alternation, not a character class: \R is a line-break *sequence* and is illegal inside
+        // [...], which compiles at first use rather than at startup — so it failed on the first
+        // rule anyone declared and on nothing before that.
+        return Arrays.stream(watch.split(",|\\R")).map(String::strip)
+                .filter(term -> !term.isEmpty()).toList();
     }
 
     /** Dropdown contents come from application.yml, not from the template. */
@@ -363,5 +440,7 @@ public class ChatController {
         model.addAttribute("longTermKinds", LongTermKind.values());
         model.addAttribute("keepRecentMessages", properties.keepRecentMessages());
         model.addAttribute("maxFacts", properties.facts().maxFacts());
+        model.addAttribute("invariantKinds", InvariantKind.values());
+        model.addAttribute("checks", Check.values());
     }
 }

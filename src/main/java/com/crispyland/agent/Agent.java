@@ -1,5 +1,9 @@
 package com.crispyland.agent;
 
+import com.crispyland.agent.invariant.Invariant;
+import com.crispyland.agent.invariant.InvariantGuard;
+import com.crispyland.agent.invariant.InvariantStore;
+import com.crispyland.agent.invariant.Invariants;
 import com.crispyland.agent.judge.Judge;
 import com.crispyland.agent.judge.Verdict;
 import com.crispyland.agent.llm.ChatRequest;
@@ -58,6 +62,8 @@ public class Agent {
     private final TokenUsageTracker usageTracker;
     private final ConversationStore conversations;
     private final LongTermStore longTerm;
+    private final InvariantStore invariants;
+    private final InvariantGuard guard;
     private final ContextPlanner contextPlanner;
     private final HistoryCompressor compressor;
     private final MemoryExtractor extractor;
@@ -79,6 +85,8 @@ public class Agent {
                  TokenUsageTracker usageTracker,
                  ConversationStore conversations,
                  LongTermStore longTerm,
+                 InvariantStore invariants,
+                 InvariantGuard guard,
                  ContextPlanner contextPlanner,
                  HistoryCompressor compressor,
                  MemoryExtractor extractor,
@@ -91,6 +99,8 @@ public class Agent {
         this.usageTracker = usageTracker;
         this.conversations = conversations;
         this.longTerm = longTerm;
+        this.invariants = invariants;
+        this.guard = guard;
         this.contextPlanner = contextPlanner;
         this.compressor = compressor;
         this.extractor = extractor;
@@ -141,6 +151,16 @@ public class Agent {
                     paused.stage().id());
         }
 
+        // Ahead of the memory writes as well as the calls, and the order is the point: a message
+        // that asks for something forbidden must not first be filed as an established fact. Left
+        // until after extraction, a refused request would still teach the agent what was asked
+        // for, and every later turn would answer against it.
+        Invariants rules = invariants.held(where.visitor());
+        InvariantGuard.Ruling ruling = guard.check(prompt, rules);
+        if (ruling.breached()) {
+            return refuse(where, who, effective, prompt, rules, ruling);
+        }
+
         // Before pricing, not after: the whole point is that this turn is the one that gets
         // cheaper, and the budget the caller is shown has to be the budget that was spent.
         int compacted = compressIfDue(id);
@@ -152,7 +172,7 @@ public class Agent {
 
         // Priced before a byte leaves the process: an oversized prompt is billed as a
         // rejection, so the cheapest place to find out it will not fit is here.
-        ContextPlanner.ContextPlan plan = contextPlanner.plan(effective, who, memory, prompt);
+        ContextPlanner.ContextPlan plan = contextPlanner.plan(effective, who, rules, memory, prompt);
         ContextBudget budget = plan.budget();
         if (budget.trimmed()) {
             log.info("Context trim: dropped {} oldest message(s) to fit {} of {} tokens",
@@ -191,7 +211,47 @@ public class Agent {
                                 latencyMillis, effective.model(), response.finishReason()))));
 
         return new AgentResult(answer, effective, usage, cumulative, budget,
-                response.finishReason(), latencyMillis, verdict, conversations.history(id), compacted);
+                response.finishReason(), latencyMillis, verdict, conversations.history(id),
+                compacted, InvariantGuard.Ruling.CLEAR);
+    }
+
+    /**
+     * Turns a breach into the turn's answer, and commits it to the transcript like any other.
+     * <p>
+     * This is where invariants part company with the other refusals in here. An overflow or a
+     * paused task throws, because nothing was produced and the message is best left in the box for
+     * the user to edit or resend. A breach produces something worth keeping: the rule, the reason
+     * it exists, and what can be done instead — which is an answer to the question, just not the
+     * one that was asked for.
+     * <p>
+     * Writing both halves into the transcript is what stops the same refusal happening twice.
+     * Dropped instead, the exchange leaves no trace the model can read, so two turns later it
+     * cheerfully proposes the forbidden thing again and the user gets the same paragraph back.
+     * Kept, the refusal is in the history and the next turn is answered in light of it.
+     * <p>
+     * Nothing is extracted from a refused message and the task does not move, both for the same
+     * reason: what was asked for is not going to happen, so filing it as established fact or as
+     * progress would record a thing that never took place.
+     */
+    private AgentResult refuse(MemoryScope where, Persona who, AgentConfig effective, String prompt,
+                               Invariants rules, InvariantGuard.Ruling ruling) {
+        String redirect = ruling.redirect();
+        conversations.append(where.conversation(),
+                List.of(Message.user(prompt), Message.assistant(redirect)));
+
+        // The guard's own call is the only thing this turn cost, and on the forbid tier not even
+        // that. Billed like any other call so a refusal is never free-looking when it was not.
+        TokenUsage usage = new TokenUsage(0, 0, ruling.costTokens());
+        log.info("Refused by {} — {}. The answer call was never made{}.",
+                ruling.broken().label(),
+                ruling.settledInJava() ? "matched on " + ruling.terms() : "ruled on by the guard",
+                ruling.costTokens() == 0 ? ", and nothing was charged"
+                        : ", at a cost of " + ruling.costTokens() + " token(s)");
+
+        return new AgentResult(redirect, effective, usage, usageTracker.record(usage),
+                contextPlanner.budget(effective, who, rules, memory(where)),
+                "invariant", 0L, Verdict.NOT_SCORED, conversations.history(where.conversation()), 0,
+                ruling);
     }
 
     /** Read-only view of the message stack, for rendering an existing dialogue. */
@@ -220,7 +280,46 @@ public class Agent {
      */
     public ContextBudget budget(MemoryScope scope, Persona persona, AgentConfig config) {
         Persona who = (persona == null) ? Persona.NONE : persona;
-        return contextPlanner.budget(effectiveConfig(who, config), who, memory(scope));
+        MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
+        return contextPlanner.budget(effectiveConfig(who, config), who,
+                invariants.held(where.visitor()), memory(where));
+    }
+
+    /** The standing rules for a visitor, for rendering the page. */
+    public Invariants invariants(String visitorId) {
+        return invariants.held(visitorId);
+    }
+
+    /**
+     * Declares a rule, or amends the one already held under the same id.
+     * <p>
+     * Public on the agent and reachable only from the controller — which is to say, only from a
+     * form somebody filled in. Nothing on the extraction path can get here, and that is the whole
+     * of what makes an invariant different from a remembered fact: a model that can mint its own
+     * constraints can mint the one that permits what it wanted to do, and the mechanism becomes
+     * decoration.
+     */
+    public Invariants declareInvariant(MemoryScope scope, Invariant invariant) {
+        MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
+        Invariants held = invariants.declare(where.visitor(), invariant);
+        log.info("Invariants rev {} — {} rule(s) now binding on this visitor.",
+                held.revision(), held.binding().size());
+        return held;
+    }
+
+    /** Stops a rule binding, keeping it and the reason on the record. */
+    public Invariants retireInvariant(MemoryScope scope, String id, String reason) {
+        MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
+        Invariants held = invariants.retire(where.visitor(), id, reason);
+        log.info("Invariant {} retired — {}. {} rule(s) still binding.",
+                id, blankAsDash(reason), held.binding().size());
+        return held;
+    }
+
+    /** Puts a retired rule back in force. */
+    public Invariants restoreInvariant(MemoryScope scope, String id) {
+        MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
+        return invariants.restore(where.visitor(), id);
     }
 
     /**

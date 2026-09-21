@@ -76,6 +76,14 @@ public class MemoryExtractor {
             exact key — that is how a correction replaces what is held instead of sitting next to \
             it. Only invent a key for a subject that is not already listed.
 
+            The value replaces whatever is held under that key outright, so write the whole of \
+            what is now known about that subject, not only the part that just changed. It has to \
+            stand on its own months from now with no message beside it, so it must be concrete: \
+            name the thing chosen, the number, the constraint. How far the work has got is not a \
+            fact about a subject — the `stage` keys report that and nothing else does, and a \
+            message that only reports progress or asks a question records no `task`, `decision`, \
+            `profile` or `knowledge` line at all.
+
             Example. Given the message "I'm Nur, a Java dev, keep answers short — leaning \
             Postgres 16 here, due end of Q3", output exactly:
             profile/name: Nur

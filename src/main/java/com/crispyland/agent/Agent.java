@@ -25,7 +25,10 @@ import com.crispyland.agent.memory.MessageStats;
 import com.crispyland.agent.memory.Summary;
 import com.crispyland.agent.policy.InputPolicy;
 import com.crispyland.agent.policy.OutputPolicy;
+import com.crispyland.agent.task.BlockedTurn;
 import com.crispyland.agent.task.PausedTurn;
+import com.crispyland.agent.task.RequestShape;
+import com.crispyland.agent.task.StageGate;
 import com.crispyland.agent.task.TaskStage;
 import com.crispyland.agent.task.TaskState;
 import com.crispyland.agent.usage.ContextBudget;
@@ -130,6 +133,19 @@ public class Agent {
      */
     public AgentResult handle(MemoryScope scope, Persona persona, String userInput,
                               AgentConfig config, PausedTurn whenPaused) {
+        return handle(scope, persona, userInput, config, whenPaused, BlockedTurn.REFUSE);
+    }
+
+    /**
+     * The same turn again, with a say in what a stage the work has not reached does to it.
+     *
+     * @param whenBlocked what to do if the message asks for implementation while the plan is still
+     *        being agreed. Separate from {@code whenPaused} rather than folded into one "overrides"
+     *        argument because the two stop the turn at different points and for unrelated reasons,
+     *        and a single flag would let an answer to one silently answer the other
+     */
+    public AgentResult handle(MemoryScope scope, Persona persona, String userInput,
+                              AgentConfig config, PausedTurn whenPaused, BlockedTurn whenBlocked) {
         MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
         Persona who = (persona == null) ? Persona.NONE : persona;
         String id = where.conversation();
@@ -164,7 +180,29 @@ public class Agent {
         // Before pricing, not after: the whole point is that this turn is the one that gets
         // cheaper, and the budget the caller is shown has to be the budget that was spent.
         int compacted = compressIfDue(id);
-        updateMemory(where, prompt);
+        Read read = updateMemory(where, prompt);
+
+        // After the extraction, because that call is where the request's shape comes from, and
+        // before the answer call, because stopping the turn after paying for the answer stops
+        // nothing. The gate is the other half of the state machine: TaskState.apply polices where
+        // the task *says* it is, and this polices what gets done while it says so.
+        StageGate.Ruling gate = StageGate.check(conversations.task(id), read.asked());
+        if (gate.blocked()) {
+            if (whenBlocked == BlockedTurn.REFUSE) {
+                throw new StageBlockedException(conversations.task(id), gate);
+            }
+            if (whenBlocked == BlockedTurn.APPROVE) {
+                // HUMAN, and this is the only place in the codebase that says so for this edge:
+                // the button *is* the approval. The gate only ever fires on planning, so the move
+                // it is standing in front of is always this one.
+                applyProposedMove(id, TaskState.Proposal.toStage(TaskStage.EXECUTION),
+                        TaskState.Authority.HUMAN);
+            } else {
+                log.info("Answered a request for execution with the task still in planning, at the "
+                        + "user's word. The stage does not move, so the next one is gated again.");
+            }
+        }
+
         MemoryState memory = new MemoryState(longTerm.recall(where.visitor()),
                 conversations.summary(id), conversations.facts(id), conversations.task(id),
                 conversations.history(id));
@@ -212,7 +250,7 @@ public class Agent {
 
         return new AgentResult(answer, effective, usage, cumulative, budget,
                 response.finishReason(), latencyMillis, verdict, conversations.history(id),
-                compacted, InvariantGuard.Ruling.CLEAR);
+                compacted, InvariantGuard.Ruling.CLEAR, read.refusedMove());
     }
 
     /**
@@ -251,7 +289,9 @@ public class Agent {
         return new AgentResult(redirect, effective, usage, usageTracker.record(usage),
                 contextPlanner.budget(effective, who, rules, memory(where)),
                 "invariant", 0L, Verdict.NOT_SCORED, conversations.history(where.conversation()), 0,
-                ruling);
+                // No move to report: a refused message is never extracted from, so nothing was
+                // ever proposed for the machine to turn down.
+                ruling, null);
     }
 
     /** Read-only view of the message stack, for rendering an existing dialogue. */
@@ -369,7 +409,7 @@ public class Agent {
      * it establish, and did it move the job on — and splitting them into two calls would double
      * the per-turn request count to re-read text this one already has.
      */
-    private void updateMemory(MemoryScope where, String prompt) {
+    private Read updateMemory(MemoryScope where, String prompt) {
         String id = where.conversation();
         Facts current = conversations.facts(id);
 
@@ -380,10 +420,13 @@ public class Agent {
         } catch (AgentException e) {
             log.warn("Memory extraction failed ({}) — continuing with the layers as they stand.",
                     e.getMessage());
-            return;
+            // NOTHING, so a failed call opens the gate rather than closing it. The gate rides on
+            // this call; a call that did not happen has not accused anybody of anything, and
+            // refusing a turn because the extractor was down would make an outage look like policy.
+            return Read.NOTHING;
         }
         if (extraction.isEmpty()) {
-            return;
+            return Read.NOTHING;
         }
 
         MemoryRouter.Routed routed = router.route(extraction.lines());
@@ -406,36 +449,59 @@ public class Agent {
                     kept.revision(), kept.size());
         }
 
-        applyProposedMove(id, TaskState.Proposal.from(routed.stage()), TaskState.Authority.MODEL);
+        TaskState.Transition move = applyProposedMove(id, TaskState.Proposal.from(routed.stage()),
+                TaskState.Authority.MODEL);
+
+        // `asks-for` is not one of the fields a proposal is built from, precisely so that asking
+        // for something cannot be the same event as the task moving to where that something
+        // belongs — otherwise the gate's own input walks the task past the gate.
+        return new Read(RequestShape.in(routed.stage()), move.refused() ? move : null);
+    }
+
+    /**
+     * The two things the extraction call tells the turn that are not memory.
+     *
+     * @param asked what the message wanted done, for the gate
+     * @param refusedMove the move the machine would not make, or {@code null} — which is nearly
+     *                    always, and the null is the point: a field that is usually absent reads
+     *                    as "nothing to report" at every call site without anyone asking it to
+     */
+    private record Read(RequestShape asked, TaskState.Transition refusedMove) {
+
+        static final Read NOTHING = new Read(RequestShape.NONE, null);
     }
 
     /**
      * Puts a proposed move to the machine and saves it if it is allowed.
      * <p>
-     * A refusal is logged at WARN and nothing else happens. That is the loudest the disagreement
+     * A refusal is logged at WARN and the turn carries on. That is the loudest the disagreement
      * should get: the model's idea of where the task is has drifted from the machine's, which is
      * worth knowing about and is not worth failing a user's turn over. The machine stays where it
      * was, which is the safe side of the disagreement — an unmoved task under-claims progress,
      * whereas an illegally moved one claims work that was never done.
+     * <p>
+     * The transition comes back rather than the state, so the caller can tell a refusal from a
+     * no-op. Both leave the task exactly where it was, and only one of them is worth showing
+     * anybody.
      */
-    private TaskState applyProposedMove(String id, TaskState.Proposal proposal,
-                                        TaskState.Authority by) {
+    private TaskState.Transition applyProposedMove(String id, TaskState.Proposal proposal,
+                                                   TaskState.Authority by) {
         TaskState current = conversations.task(id);
         TaskState.Transition transition = current.apply(proposal, by);
 
         if (transition.refused()) {
             log.warn("Refused a {} task transition — {}. The task stays in {}.",
                     by.name().toLowerCase(Locale.ROOT), transition.why(), current.stage().id());
-            return current;
+            return transition;
         }
         if (!transition.moved()) {
-            return current;
+            return transition;
         }
         conversations.saveTask(id, transition.state());
         log.info("Task rev {} — {} (step: {}, next: {} from the {})", transition.state().revision(),
                 transition.why(), blankAsDash(transition.state().step()),
                 blankAsDash(transition.state().next()), transition.state().awaiting().id());
-        return transition.state();
+        return transition;
     }
 
     private static String blankAsDash(String value) {
@@ -550,7 +616,7 @@ public class Agent {
     public TaskState moveTask(MemoryScope scope, TaskStage stage) {
         MemoryScope where = (scope == null) ? MemoryScope.of(null) : scope;
         return applyProposedMove(where.conversation(), TaskState.Proposal.toStage(stage),
-                TaskState.Authority.HUMAN);
+                TaskState.Authority.HUMAN).state();
     }
 
     /**

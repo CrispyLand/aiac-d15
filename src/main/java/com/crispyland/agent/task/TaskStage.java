@@ -42,11 +42,29 @@ public enum TaskStage {
 
     private static final Map<TaskStage, Set<TaskStage>> MOVES = new EnumMap<>(TaskStage.class);
 
+    /**
+     * The moves a person has to make, expressed as edges rather than as destinations.
+     * <p>
+     * It was a property of the target stage while {@code VALIDATION → DONE} was the only one, and
+     * that stopped working the moment {@code PLANNING → EXECUTION} joined it: execution is also
+     * reached from validation, and <em>that</em> edge is the rollback after a failed check, which
+     * the model must be able to make on its own. Same destination, opposite answer — so the answer
+     * was never about the destination.
+     */
+    private static final Map<TaskStage, Set<TaskStage>> HUMAN_ONLY = new EnumMap<>(TaskStage.class);
+
     static {
         MOVES.put(PLANNING, EnumSet.of(PLANNING, EXECUTION));
         MOVES.put(EXECUTION, EnumSet.of(EXECUTION, VALIDATION, PLANNING));
         MOVES.put(VALIDATION, EnumSet.of(VALIDATION, EXECUTION, PLANNING, DONE));
         MOVES.put(DONE, EnumSet.of(DONE));
+
+        // Leaving planning is an approval, and an approval nobody gave is not one.
+        HUMAN_ONLY.put(PLANNING, EnumSet.of(EXECUTION));
+        HUMAN_ONLY.put(EXECUTION, EnumSet.noneOf(TaskStage.class));
+        // Closing runs settled lines into permanent memory. See requiresHuman().
+        HUMAN_ONLY.put(VALIDATION, EnumSet.of(DONE));
+        HUMAN_ONLY.put(DONE, EnumSet.noneOf(TaskStage.class));
     }
 
     private final String id;
@@ -78,13 +96,30 @@ public enum TaskStage {
     }
 
     /**
-     * True for a stage only a person may move the task into.
+     * True when moving from here to {@code target} is a person's to make.
      * <p>
-     * Only {@link #DONE}, and not because closing is dangerous in itself: closing runs the task's
-     * settled lines into long-term memory, where every branch will read them and no later message
-     * will correct them. The model guessing wrong about whether a job is finished writes permanent
-     * memory on a guess, and that is not visible and not undone by the next turn. The same argument
-     * made task-finish a button rather than an inference in the first place.
+     * Two edges, for two different reasons. {@code VALIDATION → DONE} because closing runs the
+     * task's settled lines into long-term memory, where every branch will read them and no later
+     * message will correct them — a model guessing wrong about whether a job is finished writes
+     * permanent memory on a guess, invisibly and irreversibly. {@code PLANNING → EXECUTION} because
+     * otherwise a plan is never approved, only moved past: the model that wants to start building
+     * simply says it has started, and every check that reads the stage afterwards is reading a
+     * number the model chose.
+     * <p>
+     * Staying put is never anyone's approval to give, which is why the self-edge is excluded here
+     * rather than at the call site.
+     */
+    public boolean requiresHuman(TaskStage target) {
+        return target != null && target != this && HUMAN_ONLY.get(this).contains(target);
+    }
+
+    /**
+     * True for a stage no message may ever propose, from anywhere.
+     * <p>
+     * Narrower than {@link #requiresHuman(TaskStage)} and not the same question. This one decides
+     * what vocabulary the model is offered at all; that one decides whether a particular move it
+     * proposed is allowed. {@link #EXECUTION} is human-only from planning but perfectly ordinary
+     * from validation, so it belongs in the vocabulary and not here.
      */
     public boolean requiresHuman() {
         return this == DONE;

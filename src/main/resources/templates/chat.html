@@ -510,6 +510,15 @@
         </button>
     </div>
 
+    <!-- The turn succeeded and the machine still said no to something inside it. Shown here rather
+         than left in the log, because a refusal nobody can see is indistinguishable from a proposal
+         that was never made — and this line is the only evidence that the stages are load-bearing
+         rather than decorative. It is about the last turn, so it goes when the next one arrives. -->
+    <div class="fsm" th:if="${result != null and result.overruled}" style="color:#e8590c">
+        <span>overruled</span>
+        <span class="what" th:text="${result.refusedMove.why()}"></span>
+    </div>
+
     <form id="askForm" method="post" action="/">
 
         <!-- 1. Parameters -->
@@ -803,6 +812,24 @@
         <button type="submit" form="askForm" name="whenPaused" value="aside" class="ghost"
                 title="Answers this one with the task left exactly where it is. It still costs a turn and still joins the history — only the state machine is frozen.">
             Send anyway, stay paused
+        </button>
+    </div>
+
+    <!-- Same two-door shape as the pause, and for a related reason: the gate is reading a record of
+         where the work has got to, and a record can be behind. You know whether the plan is settled;
+         all the machine knows is whether anybody said so. What neither button does is let the model
+         decide — "Approve" is your word, and "Send anyway" leaves the stage exactly where it was, so
+         the next message is gated again. -->
+    <div class="card refused" th:if="${blocked}">
+        <h2>Still in planning — your message was not sent</h2>
+        <div th:text="${blocked}"></div>
+        <button type="submit" form="askForm" name="whenBlocked" value="approve"
+                title="Moves the task from planning to execution on your say-so, then answers. This is the approval the plan was waiting for.">
+            Approve the plan and send
+        </button>
+        <button type="submit" form="askForm" name="whenBlocked" value="anyway" class="ghost"
+                title="Answers this one with the task left in planning. Nothing is approved, so the next request for implementation stops here again.">
+            Send anyway, stay in planning
         </button>
     </div>
 

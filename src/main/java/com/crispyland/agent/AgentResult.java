@@ -3,6 +3,7 @@ package com.crispyland.agent;
 import com.crispyland.agent.invariant.InvariantGuard;
 import com.crispyland.agent.judge.Verdict;
 import com.crispyland.agent.memory.Message;
+import com.crispyland.agent.task.TaskState;
 import com.crispyland.agent.usage.ContextBudget;
 import com.crispyland.agent.usage.TokenUsage;
 import java.util.List;
@@ -21,6 +22,11 @@ import java.util.List;
  *                          because unlike an overflow or a paused task, something useful was
  *                          produced: the rule, the reason for it, and what to do instead. The
  *                          {@code answer} <em>is</em> that redirect
+ * @param refusedMove       the transition the model proposed and the machine would not make, or
+ *                          {@code null} on the overwhelming majority of turns that proposed
+ *                          nothing illegal. Carried rather than left in the log because a refusal
+ *                          nobody can see is indistinguishable from a proposal that never happened
+ *                          — and the turn still succeeded, so there is no exception to put it in
  */
 public record AgentResult(
         String answer,
@@ -33,7 +39,8 @@ public record AgentResult(
         Verdict verdict,
         List<Message> transcript,
         int compactedMessages,
-        InvariantGuard.Ruling refusal) {
+        InvariantGuard.Ruling refusal,
+        TaskState.Transition refusedMove) {
 
     public AgentResult {
         transcript = (transcript == null) ? List.of() : List.copyOf(transcript);
@@ -43,6 +50,11 @@ public record AgentResult(
     /** True when the answer above is a refusal rather than a reply. */
     public boolean refused() {
         return refusal.breached();
+    }
+
+    /** True when the answer went out but the model's idea of where the task is was overruled. */
+    public boolean overruled() {
+        return refusedMove != null;
     }
 
     /** How far the local estimate missed the provider's {@code prompt_tokens} by, in tokens. */

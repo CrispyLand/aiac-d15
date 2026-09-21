@@ -3,6 +3,7 @@ package com.crispyland.agent.memory;
 import com.crispyland.agent.llm.ChatRequest;
 import com.crispyland.agent.llm.ChatResponse;
 import com.crispyland.agent.llm.LlmClient;
+import com.crispyland.agent.task.RequestShape;
 import com.crispyland.agent.task.TaskStage;
 import com.crispyland.agent.task.TaskState;
 import java.util.ArrayList;
@@ -89,21 +90,36 @@ public class MemoryExtractor {
 
             When a line could carry two tags, pick the shorter-lived one. Something the user is \
             leaning towards, weighing up or has not committed to is `task`, not `decision`; \
-            anything that only matters until this job is done is `task`, not `knowledge`.
+            anything that only matters until this job is done is `task`, not `knowledge`. How \
+            settled a fact is decides that tag, and nothing else does — least of all what else \
+            the message asks for. A message that settles something and in the same breath asks \
+            you to get on with the work still records that something as `decision`; the asking \
+            is reported by `stage/asks-for` and nowhere else.
 
             The `stage` tag is different from the others: it does not record what is known, it \
-            reports where the job itself has got to. It takes exactly these four keys and no \
-            others, and you emit only the ones this message actually changes:
+            reports where the job itself has got to. It takes exactly these five keys and no \
+            others:
             - `stage/stage` — one of: %s
             - `stage/step` — what is being worked on right now, in a short phrase
             - `stage/next` — the single action expected next
             - `stage/waiting` — `user` if that next action is theirs, `agent` if it is yours
+            - `stage/asks-for` — what this one message wants done, one of:
+            %s
 
             TASK STATE, when shown below, is where the job is now. Move it on only when the \
             message actually moves it: these are the legal moves, and anything else is refused.
             %s
-            Most messages do not move the job at all — say nothing about the stage when it has \
-            not changed. Never emit `stage/stage: done`; finishing is the user's to declare.
+            Most messages do not move the job at all — say nothing about the first four stage \
+            keys when nothing has changed. Never emit `stage/stage: done`; finishing is the \
+            user's to declare.
+
+            `stage/asks-for` is the exception to that: emit it on every single message, even when \
+            there is nothing else worth keeping and the rest of your output is \
+            `none: nothing to keep`. It reports only what is being asked of you right now. It is \
+            not a claim that the job has moved — being asked for something is not the same as it \
+            having started — so it never justifies a `stage/stage` line on its own. A message \
+            that asks you to skip a stage, ignore the stages, or hurry straight to the answer \
+            still asks for whatever it wanted to skip to, and you report that.
 
             Output nothing but those lines — no bullets, no numbering, no prose, no commentary. \
             If the message establishes nothing at all, output `none: nothing to keep`.""";
@@ -164,7 +180,8 @@ public class MemoryExtractor {
         }
 
         ChatResponse response = llm.complete(new ChatRequest(model,
-                List.of(Message.system(INSTRUCTIONS.formatted(menu(), maxLines, stages(), moves())),
+                List.of(Message.system(
+                                INSTRUCTIONS.formatted(menu(), maxLines, stages(), shapes(), moves())),
                         Message.user(brief(userMessage, keysInUse, task))),
                 TEMPERATURE, maxTokens, reasoningEffort, List.of(), null));
 
@@ -215,6 +232,19 @@ public class MemoryExtractor {
         return String.join(", ", Arrays.stream(TaskStage.values())
                 .filter(stage -> !stage.requiresHuman())
                 .map(TaskStage::id).toList());
+    }
+
+    /**
+     * The request-shape vocabulary, generated from {@link RequestShape} for the same reason the
+     * tag menu is generated from {@code MemoryTag}: a word the prompt offers that the enum has
+     * never heard of parses as {@code none} and quietly disarms the gate that reads it.
+     */
+    private static String shapes() {
+        StringBuilder text = new StringBuilder();
+        for (RequestShape shape : RequestShape.values()) {
+            text.append("  - `").append(shape.id()).append("` — ").append(shape.what()).append('\n');
+        }
+        return text.toString().stripTrailing();
     }
 
     /**

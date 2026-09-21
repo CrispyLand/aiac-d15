@@ -5,9 +5,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.crispyland.agent.llm.ChatRequest;
 import com.crispyland.agent.llm.ChatResponse;
 import com.crispyland.agent.llm.LlmClient;
+import com.crispyland.agent.task.RequestShape;
 import com.crispyland.agent.task.TaskState;
 import com.crispyland.agent.usage.TokenUsage;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class MemoryExtractorTest {
@@ -48,6 +50,36 @@ class MemoryExtractorTest {
         for (MemoryTag tag : MemoryTag.values()) {
             assertThat(instructions).contains("- " + tag.id() + " — " + tag.what());
         }
+    }
+
+    @Test
+    void theRequestShapeVocabularyIsGeneratedTooSoTheGateCannotBeDisarmedByAWordItDoesNotKnow() {
+        // The gate reads `asks-for` and reads anything it does not recognise as "nothing asked
+        // for". A prompt offering a word the enum has never heard of therefore does not fail
+        // loudly — it silently opens the gate on every turn that uses it.
+        llm.content = "task/x: 1";
+        extractor().extract("anything", NO_KEYS, TaskState.EMPTY);
+
+        String instructions = llm.last.messages().getFirst().content();
+        assertThat(instructions).contains("stage/asks-for");
+        for (RequestShape shape : RequestShape.values()) {
+            assertThat(instructions).contains("`" + shape.id() + "` — " + shape.what());
+        }
+    }
+
+    @Test
+    void theShapeOfTheRequestIsReadSeparatelyFromAnyMoveItProposes() {
+        // The two travel on the same line prefix and mean unrelated things. If `asks-for` also
+        // built the proposal, asking for implementation would move the task into execution, and
+        // the gate's own input would walk the task straight past the gate.
+        llm.content = "stage/asks-for: execution";
+
+        Map<String, String> stage = new MemoryRouter()
+                .route(extractor().extract("just write it", NO_KEYS, TaskState.EMPTY).lines())
+                .stage();
+
+        assertThat(RequestShape.in(stage)).isEqualTo(RequestShape.EXECUTION);
+        assertThat(TaskState.Proposal.from(stage).isEmpty()).isTrue();
     }
 
     @Test

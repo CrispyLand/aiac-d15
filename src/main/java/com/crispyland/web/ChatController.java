@@ -7,6 +7,7 @@ import com.crispyland.agent.AgentProperties;
 import com.crispyland.agent.AgentResult;
 import com.crispyland.agent.Branches;
 import com.crispyland.agent.ContextOverflowException;
+import com.crispyland.agent.StageBlockedException;
 import com.crispyland.agent.TaskPausedException;
 import com.crispyland.agent.invariant.Check;
 import com.crispyland.agent.invariant.Invariant;
@@ -21,6 +22,7 @@ import com.crispyland.agent.memory.Message;
 import com.crispyland.agent.profile.Persona;
 import com.crispyland.agent.profile.PersonaSelector;
 import com.crispyland.agent.profile.Profiles;
+import com.crispyland.agent.task.BlockedTurn;
 import com.crispyland.agent.task.PausedTurn;
 import com.crispyland.agent.task.TaskStage;
 import com.crispyland.agent.task.TaskState;
@@ -95,10 +97,15 @@ public class ChatController {
      *        One named parameter rather than two booleans, because they are two answers to one
      *        question and no click means both. Kept off {@link ChatForm} on purpose: everything
      *        in there becomes an {@code AgentConfig}, and this is a one-shot action, not a setting.
+     * @param whenBlocked the same idea for the stage gate: {@code approve} moves the task out of
+     *        planning and then answers, {@code anyway} answers and leaves it there. A second
+     *        parameter rather than a shared one, because a click meaning "yes, the plan is agreed"
+     *        must never be readable as "yes, resume the task" — they are different admissions.
      */
     @PostMapping("/")
     public String ask(@ModelAttribute("form") ChatForm form, BindingResult binding,
-                      @RequestParam(required = false) String whenPaused, Model model,
+                      @RequestParam(required = false) String whenPaused,
+                      @RequestParam(required = false) String whenBlocked, Model model,
                       HttpServletRequest request, HttpServletResponse response) {
         MemoryScope scope = scope(request, response);
         addBranches(model, scope.visitor());
@@ -129,7 +136,7 @@ public class ChatController {
 
         try {
             AgentResult result = agent.handle(scope, persona, form.userInput(), form.toAgentConfig(),
-                    PausedTurn.from(whenPaused));
+                    PausedTurn.from(whenPaused), BlockedTurn.from(whenBlocked));
             model.addAttribute("result", result);
             addMemory(model, scope, result.transcript());
             model.addAttribute("budget", agent.budget(scope, persona, result.effectiveConfig()));
@@ -139,6 +146,12 @@ public class ChatController {
             // Not an error, and deliberately not silent. The typed message is still in the box
             // because this branch leaves the bound form alone, so "Resume and send" re-posts it.
             model.addAttribute("paused", e.getMessage());
+            addMemory(model, scope, agent.transcript(scope.conversation()));
+            model.addAttribute("budget", agent.budget(scope, persona, form.toAgentConfig()));
+        } catch (StageBlockedException e) {
+            // Same shape as the pause: not an error, and the typed message stays in the box so
+            // whichever button they pick re-posts it rather than making them write it twice.
+            model.addAttribute("blocked", e.getMessage());
             addMemory(model, scope, agent.transcript(scope.conversation()));
             model.addAttribute("budget", agent.budget(scope, persona, form.toAgentConfig()));
         } catch (ContextOverflowException e) {

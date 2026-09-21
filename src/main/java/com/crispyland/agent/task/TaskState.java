@@ -39,6 +39,14 @@ public record TaskState(TaskStage stage, String step, String next, AwaitedFrom a
     public static final String NEXT_FIELD = "next";
     public static final String WAITING_FIELD = "waiting";
 
+    /**
+     * The fifth key, and the only one that is not part of a proposal: it reports what the message
+     * asked <em>for</em> rather than where the job should go. {@link Proposal#from} does not read
+     * it, on purpose — a request for implementation is not a claim that implementation has begun,
+     * and reading it as one would let the gate's own input move the task past the gate.
+     */
+    public static final String ASKS_FOR_FIELD = "asks-for";
+
     /** Who is asking for the move. The machine trusts these two differently. */
     public enum Authority {
 
@@ -144,7 +152,9 @@ public record TaskState(TaskStage stage, String step, String next, AwaitedFrom a
      *       rather than partly: a step written to describe {@code done} is not a sensible step to
      *       file under {@code validation}, so keeping the text while dropping the stage stores a
      *       description of somewhere the task is not.</li>
-     *   <li><strong>Not the model's to make.</strong> {@link TaskStage#requiresHuman()}.</li>
+     *   <li><strong>Not the model's to make.</strong> {@link TaskStage#requiresHuman(TaskStage)} —
+     *       an edge, not a destination, so leaving planning and closing the task are both a
+     *       person's word while rolling back into execution stays the model's.</li>
      * </ol>
      * A proposal that names the current stage and changes nothing else is a no-op rather than a
      * refusal — most turns are exactly that, and counting them as refusals would bury the real ones.
@@ -162,9 +172,10 @@ public record TaskState(TaskStage stage, String step, String next, AwaitedFrom a
             return Transition.refusal(this, "%s cannot move to %s — legal moves are %s"
                     .formatted(stage.id(), target.id(), moveList()));
         }
-        if (target != stage && target.requiresHuman() && by == Authority.MODEL) {
+        if (stage.requiresHuman(target) && by == Authority.MODEL) {
             return Transition.refusal(this,
-                    "only a person may move a task to %s".formatted(target.id()));
+                    "only a person may move a task from %s to %s"
+                            .formatted(stage.id(), target.id()));
         }
 
         TaskState moved = new TaskState(target,

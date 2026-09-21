@@ -18,14 +18,41 @@ class TaskStateTest {
 
     @Test
     void theModelMayMoveTheTaskForwardOneStepAtATime() {
-        Transition moved = TaskState.EMPTY.apply(
-                new Proposal(TaskStage.EXECUTION, "writing the migration",
-                        "confirm the index name", AwaitedFrom.USER), Authority.MODEL);
+        Transition moved = inExecution().apply(
+                new Proposal(TaskStage.VALIDATION, "checking the migration",
+                        "run it against staging", AwaitedFrom.AGENT), Authority.MODEL);
 
         assertThat(moved.moved()).isTrue();
-        assertThat(moved.state().stage()).isEqualTo(TaskStage.EXECUTION);
-        assertThat(moved.state().step()).isEqualTo("writing the migration");
+        assertThat(moved.state().stage()).isEqualTo(TaskStage.VALIDATION);
+        assertThat(moved.state().step()).isEqualTo("checking the migration");
         assertThat(moved.state().isPresent()).isTrue();
+    }
+
+    @Test
+    void onlyAPersonMayLetTheTaskOutOfPlanning() {
+        // The move the model most wants to make and the one it must not: saying work has started
+        // is how a plan gets approved by nobody. It is legal on the table — it is just not the
+        // model's word to give.
+        assertThat(TaskStage.PLANNING.canMoveTo(TaskStage.EXECUTION)).isTrue();
+
+        Transition refused =
+                TaskState.EMPTY.apply(Proposal.toStage(TaskStage.EXECUTION), Authority.MODEL);
+
+        assertThat(refused.refused()).isTrue();
+        assertThat(refused.state()).isEqualTo(TaskState.EMPTY);
+        assertThat(refused.why()).contains("only a person").contains("planning").contains("execution");
+    }
+
+    @Test
+    void rollingBackIntoExecutionIsStillTheModelsToDo() {
+        // Same destination as the move above, opposite answer — which is why the human-only rule
+        // is an edge and not a property of the stage being entered. A failed check that cannot
+        // send the work back is a check with no consequence.
+        Transition back = inValidation()
+                .apply(Proposal.toStage(TaskStage.EXECUTION), Authority.MODEL);
+
+        assertThat(back.moved()).isTrue();
+        assertThat(back.state().stage()).isEqualTo(TaskStage.EXECUTION);
     }
 
     @Test
@@ -192,10 +219,11 @@ class TaskStateTest {
         assertThat(inExecution().pause().waitingOnUser()).isFalse();
     }
 
+    /** HUMAN, because leaving planning is an approval and nothing else in here can give one. */
     private static TaskState inExecution() {
         return TaskState.EMPTY.apply(
                 new Proposal(TaskStage.EXECUTION, "writing the migration",
-                        "confirm the index name", AwaitedFrom.USER), Authority.MODEL).state();
+                        "confirm the index name", AwaitedFrom.USER), Authority.HUMAN).state();
     }
 
     private static TaskState inValidation() {
